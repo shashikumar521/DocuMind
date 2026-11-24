@@ -1,22 +1,33 @@
 import React, { useCallback, useEffect, useState } from "react";
+import {
+  AlertCircle,
+  BookOpen,
+  CheckCircle2,
+  Clock,
+  FileText,
+  Layers,
+  MessageSquareText,
+  Search,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { deleteDocumentById, fetchDashboardStats } from "../api";
+import { AnimatedCounter } from "../components/AnimatedCounter";
 import { AppShell, AvatarBadge } from "../components/AppShell";
-import { DashboardStats, ProcessingStatus, RoutePage, UserPreferences } from "../types";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useToast } from "../components/ToastProvider";
+import {
+  DashboardStats,
+  DocuMindDocument,
+  ProcessingStatus,
+  RoutePage,
+  UserPreferences,
+} from "../types";
 
 interface MainDashboardProps {
   onNavigate: (page: RoutePage) => void;
   onSelectDocumentForChat: (documentId: string) => void;
   preferences: UserPreferences;
-}
-
-function formatStatusStyle(status: ProcessingStatus): string {
-  if (status === "Indexed Successfully") {
-    return "bg-success-container text-on-success-container";
-  }
-  if (status === "Failed") {
-    return "bg-light-error-container text-light-on-error-container dark:bg-dark-error-container dark:text-dark-on-error-container";
-  }
-  return "bg-warning-container text-on-warning-container";
 }
 
 function formatDate(iso: string): string {
@@ -31,6 +42,31 @@ function formatDate(iso: string): string {
   }
 }
 
+function StatusDisplay({ status }: { status: ProcessingStatus }) {
+  if (status === "Indexed Successfully") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-400 whitespace-nowrap">
+        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+        <span>Indexed</span>
+      </span>
+    );
+  }
+  if (status === "Failed") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 dark:text-red-400 whitespace-nowrap">
+        <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+        <span>Failed</span>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300 whitespace-nowrap">
+      <Clock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+      <span>{status}</span>
+    </span>
+  );
+}
+
 export const MainDashboard: React.FC<MainDashboardProps> = ({
   onNavigate,
   onSelectDocumentForChat,
@@ -40,7 +76,9 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<DocuMindDocument | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const { pushToast } = useToast();
 
   const loadStats = useCallback(async () => {
     try {
@@ -48,7 +86,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
       const data = await fetchDashboardStats();
       setStats(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load dashboard statistics.");
+      setError(err instanceof Error ? err.message : "Failed to load workspace statistics.");
     } finally {
       setLoading(false);
     }
@@ -58,15 +96,24 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
     loadStats();
   }, [loadStats]);
 
-  const handleDelete = async (documentId: string) => {
-    setDeletingId(documentId);
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
     try {
-      await deleteDocumentById(documentId);
+      await deleteDocumentById(pendingDelete.id);
+      pushToast({
+        kind: "success",
+        title: "Document deleted",
+        description: `Removed "${pendingDelete.filename}" and its indexed vectors.`,
+      });
+      setPendingDelete(null);
       await loadStats();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to delete document.");
+      const msg = err instanceof Error ? err.message : "Failed to delete document.";
+      setError(msg);
+      pushToast({ kind: "error", title: "Delete failed", description: msg });
     } finally {
-      setDeletingId(null);
+      setDeleting(false);
     }
   };
 
@@ -74,184 +121,193 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
     doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const firstName = preferences.displayName.split(" ")[0] || "there";
+
   return (
     <AppShell
       activePage="dashboard"
       onNavigate={onNavigate}
-      title="Welcome to DocuMind"
-      subtitle="Your intelligent document workspace."
+      title={`Welcome back, ${firstName}`}
+      subtitle="Live overview of your indexed PDF knowledge base and grounded Q&A sessions."
       preferences={preferences}
       headerActions={
         <>
           <div className="hidden md:block relative w-64">
-            <span
-              className="material-symbols-outlined text-light-outline dark:text-dark-outline text-[18px] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+            <Search
+              className="w-4 h-4 text-[var(--dm-text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
               aria-hidden="true"
-            >
-              search
-            </span>
+            />
             <input
               type="search"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Filter documents..."
-              aria-label="Filter documents"
-              className="w-full pl-9 pr-3 py-1.5 rounded bg-light-surface-container-low dark:bg-dark-surface-container-low border border-light-outline-variant/70 dark:border-dark-outline-variant/70 text-light-on-surface dark:text-dark-on-surface placeholder:text-light-outline dark:placeholder:text-dark-outline font-body text-body-sm focus:border-light-primary focus:ring-2 focus:ring-light-primary/20 focus:outline-none"
+              placeholder="Search documents..."
+              aria-label="Search recent documents"
+              className="w-full pl-9 pr-3 py-2 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none transition-colors"
             />
           </div>
           <button
             type="button"
+            onClick={() => onNavigate("documents")}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-xs sm:text-sm font-semibold transition-all whitespace-nowrap shrink-0"
+          >
+            <Upload className="w-4 h-4" />
+            <span className="hidden sm:inline">Upload Document</span>
+            <span className="sm:hidden">Upload</span>
+          </button>
+          <button
+            type="button"
             onClick={() => onNavigate("settings")}
-            aria-label="Profile settings"
-            className="inline-flex items-center p-1 rounded-full hover:bg-light-surface-container dark:hover:bg-dark-surface-container transition-colors duration-state-change"
+            aria-label="Workspace profile and settings"
+            className="hidden sm:inline-flex rounded-full p-0.5 hover:ring-2 hover:ring-violet-400/50 transition-all"
           >
             <AvatarBadge size="sm" name={preferences.displayName} />
           </button>
         </>
       }
     >
-      <main className="flex-1 p-gutter-md lg:p-gutter-lg max-w-7xl w-full mx-auto flex flex-col gap-gutter-lg">
-        {/* Action Banner */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-gutter-md bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-md shadow-sm">
-          <div className="flex flex-col gap-gutter-xs">
-            <span className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface">
-              Live RAG Workspace Overview
-            </span>
-            <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-              All metrics below reflect your actual uploaded PDFs, extracted pages, vector chunks, and
-              grounded Q&amp;A sessions.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => onNavigate("documents")}
-            className="inline-flex items-center justify-center gap-gutter-sm px-gutter-md py-2.5 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container font-label text-label-lg hover:bg-light-primary-container transition-colors duration-state-change shadow-sm shrink-0 whitespace-nowrap"
-          >
-            <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-              upload_file
-            </span>
-            <span>Upload New Document</span>
-          </button>
+      <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto flex flex-col gap-6">
+        {/* Mobile search */}
+        <div className="md:hidden relative">
+          <Search
+            className="w-4 h-4 text-[var(--dm-text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+            aria-hidden="true"
+          />
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search recent documents..."
+            aria-label="Search recent documents"
+            className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none"
+          />
         </div>
 
         {error && (
           <div
             role="alert"
-            className="p-gutter-md rounded bg-light-error-container dark:bg-dark-error-container text-light-on-error-container dark:text-dark-on-error-container flex items-center gap-gutter-sm"
+            className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300 flex items-center gap-3 text-sm"
           >
-            <span className="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">
-              error
-            </span>
-            <span className="font-body text-body-sm">{error}</span>
+            <AlertCircle className="w-5 h-5 shrink-0" aria-hidden="true" />
+            <span>{error}</span>
           </div>
         )}
 
-        {/* Summary Metric Cards */}
+        {/* Statistics Cards */}
         <section
-          aria-label="Workspace Summary Metrics"
-          className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-gutter-md items-stretch"
+          aria-label="Workspace Statistics"
+          className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4"
         >
           {[
             {
               label: "Total Documents",
               value: stats?.total_documents ?? 0,
               sub: `${stats?.indexed_documents ?? 0} indexed and ready`,
-              icon: "description",
-              color: "text-light-primary dark:text-dark-primary",
+              icon: FileText,
+              tone: "text-violet-700 dark:text-violet-300 bg-violet-500/15 border-violet-400/25",
             },
             {
-              label: "Total Pages Processed",
+              label: "Indexed Pages",
               value: stats?.total_pages_processed ?? 0,
-              sub: "Extracted PDF pages",
-              icon: "auto_stories",
-              color: "text-light-secondary dark:text-dark-secondary",
+              sub: "Extracted across uploaded PDFs",
+              icon: BookOpen,
+              tone: "text-cyan-700 dark:text-cyan-300 bg-cyan-500/15 border-cyan-400/25",
             },
             {
-              label: "Total Chunks Indexed",
+              label: "Total Text Chunks",
               value: stats?.total_chunks_indexed ?? 0,
               sub: "Stored vector embeddings",
-              icon: "hub",
-              color: "text-light-primary dark:text-dark-primary",
+              icon: Layers,
+              tone: "text-violet-700 dark:text-violet-300 bg-violet-500/15 border-violet-400/25",
             },
             {
-              label: "Questions Answered",
+              label: "Successful Queries",
               value: stats?.questions_answered ?? 0,
-              sub: "Grounded Gemini Q&A turns",
-              icon: "forum",
-              color: "text-light-secondary dark:text-dark-secondary",
+              sub: "Grounded Gemini responses",
+              icon: MessageSquareText,
+              tone: "text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 border-emerald-400/25",
             },
-          ].map((metric) => (
-            <article
-              key={metric.label}
-              className="h-full bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-lg shadow-sm flex flex-col justify-between gap-gutter-sm"
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-label text-label-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  {metric.label}
-                </span>
-                <span className={`material-symbols-outlined ${metric.color} text-[20px]`} aria-hidden="true">
-                  {metric.icon}
-                </span>
-              </div>
-              <div>
-                <p className="font-headline text-headline-lg text-light-on-surface dark:text-dark-on-surface tabular-nums">
-                  {loading ? "—" : metric.value.toLocaleString()}
-                </p>
-                <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  {metric.sub}
-                </p>
-              </div>
-            </article>
-          ))}
+          ].map((metric) => {
+            const Icon = metric.icon;
+            return (
+              <article
+                key={metric.label}
+                className="dm-card p-5 flex flex-col justify-between gap-4 hover:border-violet-400/30 transition-colors duration-150"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-[var(--dm-text-muted)]">
+                    {metric.label}
+                  </span>
+                  <span
+                    className={`w-9 h-9 rounded-xl border flex items-center justify-center ${metric.tone}`}
+                  >
+                    <Icon className="w-4 h-4" aria-hidden="true" />
+                  </span>
+                </div>
+                <div>
+                  {loading ? (
+                    <div className="h-8 w-20 rounded-lg bg-white/5 animate-pulse" />
+                  ) : (
+                    <p className="font-display text-3xl font-bold text-[var(--dm-text)] tabular-nums">
+                      <AnimatedCounter value={metric.value} />
+                    </p>
+                  )}
+                  <p className="mt-1 text-xs text-[var(--dm-text-muted)]">{metric.sub}</p>
+                </div>
+              </article>
+            );
+          })}
         </section>
 
-        {/* Two-Column Workspace Content */}
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-gutter-lg items-start">
-          {/* Recent Documents Table */}
-          <section className="xl:col-span-8 bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md shadow-sm overflow-hidden">
-            <div className="p-gutter-lg border-b border-light-outline-variant/50 dark:border-dark-outline-variant/50 flex items-center justify-between gap-gutter-md">
+        {/* Main Workspace Split */}
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+          {/* Recent Documents & Processing Status */}
+          <section className="xl:col-span-8 dm-card overflow-hidden">
+            <div className="p-5 sm:p-6 border-b border-[var(--dm-border)] flex items-center justify-between gap-4">
               <div>
-                <h2 className="font-headline text-headline-sm text-light-on-surface dark:text-dark-on-surface">
+                <h2 className="font-display text-base sm:text-lg font-semibold text-[var(--dm-text)]">
                   Recent Documents
                 </h2>
-                <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  Uploaded PDFs and their current indexing status.
+                <p className="text-xs sm:text-sm text-[var(--dm-text-muted)]">
+                  Recently processed PDFs, indexing status, and chunk counts.
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => onNavigate("documents")}
-                className="font-label text-label-lg text-light-primary dark:text-dark-primary hover:underline whitespace-nowrap shrink-0"
+                className="text-xs sm:text-sm font-medium text-cyan-700 dark:text-cyan-300 hover:text-cyan-600 dark:hover:text-cyan-200 transition-colors whitespace-nowrap shrink-0"
               >
                 Manage All
               </button>
             </div>
 
             {loading ? (
-              <div className="p-gutter-lg flex flex-col gap-gutter-sm">
-                <div className="h-10 rounded bg-light-surface-container dark:bg-dark-surface-container animate-pulse" />
-                <div className="h-10 rounded bg-light-surface-container dark:bg-dark-surface-container animate-pulse" />
+              <div className="p-5 space-y-3">
+                {[1, 2, 3].map((row) => (
+                  <div key={row} className="h-12 rounded-xl bg-slate-900/5 dark:bg-white/5 animate-pulse" />
+                ))}
               </div>
             ) : filteredDocs.length === 0 ? (
-              <div className="p-gutter-xl text-center flex flex-col items-center gap-gutter-sm">
-                <span className="material-symbols-outlined text-light-on-surface-variant dark:text-dark-on-surface-variant text-[32px]" aria-hidden="true">
-                  folder_off
-                </span>
-                <p className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface">
-                  {searchQuery ? "No matching documents found" : "No documents uploaded yet"}
+              <div className="p-10 text-center flex flex-col items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-violet-500/15 border border-violet-400/25 text-violet-700 dark:text-violet-300 flex items-center justify-center">
+                  <FileText className="w-5 h-5" aria-hidden="true" />
+                </div>
+                <p className="font-display text-base font-semibold text-[var(--dm-text)]">
+                  {searchQuery ? "No matching documents found" : "No documents indexed yet"}
                 </p>
-                <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant max-w-md">
+                <p className="text-sm text-[var(--dm-text-muted)] max-w-md">
                   {searchQuery
-                    ? "Try clearing your search filter."
-                    : "Upload PDF documents to extract text, generate vector embeddings, and start asking questions."}
+                    ? "Try adjusting or clearing your document filter."
+                    : "Upload your first PDF to extract pages, generate Gemini embeddings, and start asking citation-backed questions."}
                 </p>
                 {!searchQuery && (
                   <button
                     type="button"
                     onClick={() => onNavigate("documents")}
-                    className="mt-gutter-xs px-gutter-md py-2 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary font-label text-label-md hover:bg-light-primary-container transition-colors"
+                    className="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 text-white text-sm font-semibold"
                   >
-                    Upload First PDF
+                    <Upload className="w-4 h-4" />
+                    <span>Upload First PDF</span>
                   </button>
                 )}
               </div>
@@ -259,60 +315,46 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
-                    <tr className="border-b border-light-outline-variant/50 dark:border-dark-outline-variant/50 bg-light-surface-container-low/60 dark:bg-dark-surface-container/60">
-                      <th className="py-3 px-gutter-md font-label text-label-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                        Document Name
-                      </th>
-                      <th className="py-3 px-gutter-md font-label text-label-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                        Pages
-                      </th>
-                      <th className="py-3 px-gutter-md font-label text-label-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                        Upload Date
-                      </th>
-                      <th className="py-3 px-gutter-md font-label text-label-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                        Status
-                      </th>
-                      <th className="py-3 px-gutter-md font-label text-label-md text-light-on-surface-variant dark:text-dark-on-surface-variant text-right">
-                        Actions
-                      </th>
+                    <tr className="border-b border-[var(--dm-border)] bg-[var(--dm-bg-secondary)]/60 text-xs font-medium text-[var(--dm-text-muted)]">
+                      <th className="py-3 px-5">Document</th>
+                      <th className="py-3 px-4 text-right">Pages</th>
+                      <th className="py-3 px-4 text-right">Chunks</th>
+                      <th className="py-3 px-4">Uploaded</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-5 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-light-outline-variant/40 dark:divide-dark-outline-variant/40">
+                  <tbody className="divide-y divide-[var(--dm-border)] text-sm">
                     {filteredDocs.map((doc) => (
                       <tr
                         key={doc.id}
-                        className="hover:bg-light-surface-container-low/40 dark:hover:bg-dark-surface-container/40 transition-colors duration-state-change"
+                        className="hover:bg-slate-900/[0.03] dark:hover:bg-white/[0.025] transition-colors"
                       >
-                        <td className="py-3.5 px-gutter-md">
-                          <div className="flex items-center gap-gutter-sm">
-                            <span
-                              className="material-symbols-outlined text-light-primary dark:text-dark-primary text-[20px] shrink-0"
+                        <td className="py-3.5 px-5">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <FileText
+                              className="w-4 h-4 text-violet-700 dark:text-violet-300 shrink-0"
                               aria-hidden="true"
-                            >
-                              picture_as_pdf
-                            </span>
-                            <span className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface truncate max-w-[260px]">
+                            />
+                            <span className="font-medium text-[var(--dm-text)] truncate max-w-[240px]">
                               {doc.filename}
                             </span>
                           </div>
                         </td>
-                        <td className="py-3.5 px-gutter-md font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant tabular-nums">
+                        <td className="py-3.5 px-4 text-right font-mono text-xs text-[var(--dm-text-secondary)] tabular-nums">
                           {doc.pages || "—"}
                         </td>
-                        <td className="py-3.5 px-gutter-md font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant tabular-nums whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-mono text-xs text-[var(--dm-text-secondary)] tabular-nums">
+                          {doc.chunks_count || "—"}
+                        </td>
+                        <td className="py-3.5 px-4 text-xs text-[var(--dm-text-muted)] whitespace-nowrap tabular-nums">
                           {formatDate(doc.uploaded_at)}
                         </td>
-                        <td className="py-3.5 px-gutter-md">
-                          <span
-                            className={`inline-flex items-center px-2.5 py-0.5 rounded font-label text-label-sm whitespace-nowrap ${formatStatusStyle(
-                              doc.status
-                            )}`}
-                          >
-                            {doc.status}
-                          </span>
+                        <td className="py-3.5 px-4">
+                          <StatusDisplay status={doc.status} />
                         </td>
-                        <td className="py-3.5 px-gutter-md text-right">
-                          <div className="inline-flex items-center gap-gutter-xs">
+                        <td className="py-3.5 px-5 text-right">
+                          <div className="inline-flex items-center gap-1">
                             {doc.status === "Indexed Successfully" && (
                               <button
                                 type="button"
@@ -321,21 +363,20 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
                                   onNavigate("chat");
                                 }}
                                 aria-label={`Chat with ${doc.filename}`}
-                                title="Ask questions about this document"
-                                className="p-1.5 rounded text-light-primary dark:text-dark-primary hover:bg-light-surface-container dark:hover:bg-dark-surface-container"
+                                title="Ask AI about this document"
+                                className="p-2 rounded-lg text-cyan-700 dark:text-cyan-300 hover:bg-cyan-500/15 transition-colors"
                               >
-                                <span className="material-symbols-outlined text-[18px]">chat</span>
+                                <MessageSquareText className="w-4 h-4" />
                               </button>
                             )}
                             <button
                               type="button"
-                              disabled={deletingId === doc.id}
-                              onClick={() => handleDelete(doc.id)}
+                              onClick={() => setPendingDelete(doc)}
                               aria-label={`Delete ${doc.filename}`}
                               title="Delete document and vectors"
-                              className="p-1.5 rounded text-light-error dark:text-dark-error hover:bg-light-error-container/40 disabled:opacity-50"
+                              className="p-2 rounded-lg text-red-700 dark:text-red-400 hover:bg-red-500/15 transition-colors"
                             >
-                              <span className="material-symbols-outlined text-[18px]">delete</span>
+                              <Trash2 className="w-4 h-4" />
                             </button>
                           </div>
                         </td>
@@ -347,33 +388,42 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
             )}
           </section>
 
-          {/* Recent Conversations */}
-          <section className="xl:col-span-4 bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md shadow-sm flex flex-col">
-            <div className="p-gutter-lg border-b border-light-outline-variant/50 dark:border-dark-outline-variant/50 flex items-center justify-between gap-gutter-sm">
-              <h2 className="font-headline text-title-lg text-light-on-surface dark:text-dark-on-surface truncate">
-                Recent Conversations
+          {/* Recent Chat Activity */}
+          <section className="xl:col-span-4 dm-card flex flex-col">
+            <div className="p-5 sm:p-6 border-b border-[var(--dm-border)] flex items-center justify-between gap-2">
+              <h2 className="font-display text-base sm:text-lg font-semibold text-[var(--dm-text)] truncate">
+                Recent Chat Activity
               </h2>
               <button
                 type="button"
                 onClick={() => onNavigate("chat")}
-                className="font-label text-label-md text-light-primary dark:text-dark-primary hover:underline shrink-0"
+                className="text-xs sm:text-sm font-medium text-cyan-700 dark:text-cyan-300 hover:text-cyan-600 dark:hover:text-cyan-200 whitespace-nowrap shrink-0"
               >
                 Open Chat
               </button>
             </div>
-            <div className="p-gutter-md flex flex-col gap-gutter-sm">
-              {(stats?.recent_conversations ?? []).length === 0 ? (
-                <div className="p-gutter-md text-center flex flex-col items-center gap-gutter-xs">
-                  <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                    No questions asked yet. Start a conversation in AI Chat or run a RAG vs. Without RAG
-                    comparison.
+
+            <div className="p-4 flex flex-col gap-3">
+              {loading ? (
+                <div className="space-y-3">
+                  <div className="h-20 rounded-xl bg-slate-900/5 dark:bg-white/5 animate-pulse" />
+                  <div className="h-20 rounded-xl bg-slate-900/5 dark:bg-white/5 animate-pulse" />
+                </div>
+              ) : (stats?.recent_conversations ?? []).length === 0 ? (
+                <div className="p-6 text-center flex flex-col items-center gap-2.5">
+                  <MessageSquareText
+                    className="w-7 h-7 text-[var(--dm-text-muted)]"
+                    aria-hidden="true"
+                  />
+                  <p className="text-sm text-[var(--dm-text-muted)]">
+                    No conversations yet. Ask a question in AI Chat or evaluate responses in RAG Comparison.
                   </p>
                   <button
                     type="button"
                     onClick={() => onNavigate("chat")}
-                    className="mt-gutter-xs font-label text-label-md text-light-primary dark:text-dark-primary hover:underline"
+                    className="mt-1 text-xs font-semibold text-cyan-700 dark:text-cyan-300 hover:text-cyan-600 dark:hover:text-cyan-200"
                   >
-                    Ask your first question
+                    Start a Conversation
                   </button>
                 </div>
               ) : (
@@ -382,17 +432,17 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
                     key={conv.id}
                     type="button"
                     onClick={() => onNavigate("chat")}
-                    className="text-left p-gutter-md rounded border border-light-outline-variant/50 dark:border-dark-outline-variant/50 hover:border-light-primary hover:bg-light-surface-container-low/50 dark:hover:bg-dark-surface-container/50 transition-colors duration-state-change flex flex-col gap-gutter-xs"
+                    className="text-left p-3.5 rounded-xl bg-[var(--dm-bg-secondary)]/70 border border-[var(--dm-border)] hover:border-violet-400/40 transition-colors flex flex-col gap-1.5"
                   >
-                    <div className="flex items-center justify-between gap-gutter-sm">
-                      <span className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface truncate">
+                    <div className="flex items-center justify-between gap-2 text-xs text-[var(--dm-text-muted)]">
+                      <span className="truncate font-medium text-[var(--dm-text)]">
                         {conv.question}
                       </span>
-                      <span className="font-label text-label-sm text-light-on-surface-variant dark:text-dark-on-surface-variant shrink-0 tabular-nums">
-                        {conv.sources.length} sources
+                      <span className="font-mono shrink-0 tabular-nums">
+                        {conv.sources.length} src
                       </span>
                     </div>
-                    <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant line-clamp-2">
+                    <p className="text-xs text-[var(--dm-text-muted)] line-clamp-2 leading-relaxed">
                       {conv.answer}
                     </p>
                   </button>
@@ -402,6 +452,20 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
           </section>
         </div>
       </main>
+
+      <ConfirmDialog
+        open={Boolean(pendingDelete)}
+        title="Delete Document & Vectors?"
+        description={
+          pendingDelete
+            ? `This will permanently remove "${pendingDelete.filename}", its ${pendingDelete.chunks_count} indexed vector chunks, and the uploaded PDF file.`
+            : ""
+        }
+        confirmLabel="Delete Document"
+        busy={deleting}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={confirmDelete}
+      />
     </AppShell>
   );
 };

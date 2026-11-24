@@ -1,4 +1,21 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertCircle,
+  BookOpen,
+  Check,
+  ChevronRight,
+  Copy,
+  FileText,
+  History,
+  MessageSquareText,
+  PanelRightClose,
+  PanelRightOpen,
+  RefreshCw,
+  Send,
+  Sparkles,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import {
   askChatQuestion,
   clearChatHistoryApi,
@@ -6,6 +23,9 @@ import {
   fetchDocuments,
 } from "../api";
 import { AppShell } from "../components/AppShell";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { MarkdownRenderer } from "../components/MarkdownRenderer";
+import { useToast } from "../components/ToastProvider";
 import {
   ConversationTurn,
   DocuMindDocument,
@@ -22,12 +42,8 @@ interface AIDocumentChatProps {
   preferences: UserPreferences;
 }
 
-const SUGGESTED_PROMPTS = [
-  "Summarize the main points of this document",
-  "Explain the key concepts and definitions",
-  "What are the most important findings or requirements?",
-  "Compare two topics discussed across my documents",
-];
+type MobileTab = "sidebar" | "chat" | "sources";
+type SidebarTab = "documents" | "history";
 
 export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
   onNavigate,
@@ -39,13 +55,19 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
   const [documents, setDocuments] = useState<DocuMindDocument[]>([]);
   const [history, setHistory] = useState<ConversationTurn[]>([]);
   const [activeSources, setActiveSources] = useState<RetrievedChunk[]>([]);
+  const [highlightedChunkId, setHighlightedChunkId] = useState<string | null>(null);
   const [questionInput, setQuestionInput] = useState("");
   const [asking, setAsking] = useState(false);
   const [loadingInit, setLoadingInit] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showSourcesPanel, setShowSourcesPanel] = useState(true);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("documents");
+  const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const { pushToast } = useToast();
 
   const loadInitial = useCallback(async () => {
     try {
@@ -78,7 +100,41 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history.length, asking]);
 
-  const indexedDocs = documents.filter((d) => d.status === "Indexed Successfully");
+  const indexedDocs = useMemo(
+    () => documents.filter((d) => d.status === "Indexed Successfully"),
+    [documents]
+  );
+
+  const selectedIndexedDocs = useMemo(
+    () => indexedDocs.filter((d) => selectedDocIds.includes(d.id)),
+    [indexedDocs, selectedDocIds]
+  );
+
+  // Build context-aware suggested questions based on actual uploaded PDFs
+  const suggestedPrompts = useMemo(() => {
+    const activeList = selectedIndexedDocs.length > 0 ? selectedIndexedDocs : indexedDocs;
+    if (activeList.length === 0) {
+      return [
+        "Summarize the key takeaways from this document",
+        "List the main requirements, numbers, or policies stated",
+        "Explain the key technical definitions and concepts",
+      ];
+    }
+    const primaryName = activeList[0].filename.replace(/\.pdf$/i, "").replace(/[_-]+/g, " ");
+    if (activeList.length === 1) {
+      return [
+        `Summarize the key findings and requirements in ${primaryName}`,
+        `What specific rules, deadlines, or metrics are stated in ${primaryName}?`,
+        `List important definitions and action items from ${primaryName}`,
+      ];
+    }
+    const secondName = activeList[1].filename.replace(/\.pdf$/i, "").replace(/[_-]+/g, " ");
+    return [
+      `Summarize the main points across ${primaryName} and ${secondName}`,
+      `Compare the key requirements or policies between ${primaryName} and ${secondName}`,
+      `What specific timelines, limits, or metrics appear in these documents?`,
+    ];
+  }, [indexedDocs, selectedIndexedDocs]);
 
   const toggleDoc = (docId: string) => {
     if (selectedDocIds.includes(docId)) {
@@ -92,13 +148,16 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
     const q = questionText.trim();
     if (!q || asking) return;
     if (indexedDocs.length === 0) {
-      setError("Please upload and index at least one PDF document before asking questions.");
+      const msg = "Please upload and index at least one PDF document before asking questions.";
+      setError(msg);
+      pushToast({ kind: "info", title: "No indexed PDFs", description: msg });
       return;
     }
 
     setError(null);
     setAsking(true);
     setQuestionInput("");
+    setMobileTab("chat");
 
     try {
       const scopeIds = selectedDocIds.length > 0 ? selectedDocIds : indexedDocs.map((d) => d.id);
@@ -117,22 +176,33 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
       };
       setHistory((prev) => [...prev, newTurn]);
       setActiveSources(res.sources || []);
+      setHighlightedChunkId(res.sources?.[0]?.chunk_id ?? null);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to generate Gemini response.");
+      const msg = err instanceof Error ? err.message : "Failed to generate Gemini response.";
+      setError(msg);
       setQuestionInput(q);
+      pushToast({ kind: "error", title: "Chat request failed", description: msg });
     } finally {
       setAsking(false);
     }
   };
 
-  const handleClearChat = async () => {
+  const confirmClearChat = async () => {
+    setClearing(true);
     try {
       await clearChatHistoryApi();
       setHistory([]);
       setActiveSources([]);
+      setHighlightedChunkId(null);
       setError(null);
+      setConfirmClearOpen(false);
+      pushToast({ kind: "success", title: "Conversation cleared" });
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to clear conversation history.");
+      const msg = err instanceof Error ? err.message : "Failed to clear conversation history.";
+      setError(msg);
+      pushToast({ kind: "error", title: "Clear failed", description: msg });
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -140,10 +210,18 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
     try {
       await navigator.clipboard.writeText(text);
       setCopiedId(id);
+      pushToast({ kind: "success", title: "Answer copied to clipboard" });
       setTimeout(() => setCopiedId(null), 1500);
     } catch {
-      // Ignore clipboard failure
+      pushToast({ kind: "error", title: "Clipboard unavailable" });
     }
+  };
+
+  const handleCitationSelect = (chunk: RetrievedChunk, turnSources: RetrievedChunk[]) => {
+    setActiveSources(turnSources);
+    setHighlightedChunkId(chunk.chunk_id);
+    setShowSourcesPanel(true);
+    setMobileTab("sources");
   };
 
   return (
@@ -151,175 +229,263 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
       activePage="chat"
       onNavigate={onNavigate}
       title="AI Document Chat"
-      subtitle="Ask grounded questions across your selected PDFs."
+      subtitle="Ask questions grounded strictly in your uploaded PDFs with interactive page citations."
       preferences={preferences}
       headerActions={
-        <div className="flex items-center gap-gutter-sm">
+        <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={handleClearChat}
-            className="inline-flex items-center gap-gutter-xs px-3 py-1.5 rounded border border-light-outline-variant dark:border-dark-outline-variant text-light-on-surface-variant dark:text-dark-on-surface-variant hover:text-light-on-surface dark:hover:text-dark-on-surface hover:bg-light-surface-container-low dark:hover:bg-dark-surface-container font-label text-label-md transition-colors duration-state-change whitespace-nowrap"
+            disabled={history.length === 0}
+            onClick={() => setConfirmClearOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-[var(--dm-border)] text-xs font-medium text-[var(--dm-text-secondary)] hover:bg-slate-900/5 dark:hover:bg-white/5 disabled:opacity-40 transition-colors whitespace-nowrap"
           >
-            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
-              delete_sweep
-            </span>
-            <span className="hidden sm:inline">Clear Conversation</span>
+            <Trash2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Clear Chat</span>
           </button>
           <button
             type="button"
             onClick={() => setShowSourcesPanel((prev) => !prev)}
-            className="inline-flex items-center gap-gutter-xs px-3 py-1.5 rounded bg-light-surface-container dark:bg-dark-surface-container text-light-on-surface dark:text-dark-on-surface font-label text-label-md hover:bg-light-surface-container-high dark:hover:bg-dark-surface-container-high transition-colors duration-state-change shrink-0 whitespace-nowrap tabular-nums"
+            className="hidden lg:inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-xs font-medium text-[var(--dm-text)] hover:border-violet-400/40 transition-colors whitespace-nowrap tabular-nums"
           >
-            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
-              dock_to_right
-            </span>
+            {showSourcesPanel ? (
+              <PanelRightClose className="w-4 h-4 text-cyan-700 dark:text-cyan-300" />
+            ) : (
+              <PanelRightOpen className="w-4 h-4 text-cyan-700 dark:text-cyan-300" />
+            )}
             <span>Sources ({activeSources.length})</span>
           </button>
         </div>
       }
     >
-      {/* 3-Pane Chat Layout */}
+      {/* Mobile View Switcher */}
+      <div className="lg:hidden px-4 pt-3 pb-2 border-b border-[var(--dm-border)] bg-[var(--dm-bg-secondary)]/60">
+        <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)]">
+          {(
+            [
+              { id: "sidebar", label: `Docs (${selectedIndexedDocs.length})` },
+              { id: "chat", label: "Chat" },
+              { id: "sources", label: `Sources (${activeSources.length})` },
+            ] as { id: MobileTab; label: string }[]
+          ).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setMobileTab(tab.id)}
+              className={`py-2 rounded-lg text-xs font-medium transition-colors ${
+                mobileTab === tab.id
+                  ? "bg-violet-500/20 text-[var(--dm-text)] border border-violet-400/35"
+                  : "text-[var(--dm-text-muted)]"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 3-Pane Chat Workspace */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 min-h-[calc(100vh-4rem)]">
-        {/* Left Panel: Uploaded Document Selection */}
-        <section
-          aria-label="Document Selection"
-          className="lg:col-span-3 bg-light-surface-container-low/50 dark:bg-dark-surface-container-low/50 border-b lg:border-b-0 lg:border-r border-light-outline-variant/60 dark:border-dark-outline-variant/60 p-gutter-md flex flex-col gap-gutter-md"
+        {/* Left Sidebar: Document Scope & Conversation History */}
+        <aside
+          aria-label="Documents and Conversation History"
+          className={`${
+            mobileTab === "sidebar" ? "flex" : "hidden lg:flex"
+          } lg:col-span-3 flex-col border-b lg:border-b-0 lg:border-r border-[var(--dm-border)] bg-[var(--dm-bg-secondary)]/55 p-4 gap-4`}
         >
-          <div className="flex items-center justify-between">
-            <h2 className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface">
-              Active Documents
-            </h2>
-            <span className="font-label text-label-sm text-light-primary dark:text-dark-primary tabular-nums">
-              {selectedDocIds.filter((id) => indexedDocs.some((d) => d.id === id)).length} selected
-            </span>
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)]">
+            <button
+              type="button"
+              onClick={() => setSidebarTab("documents")}
+              className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                sidebarTab === "documents"
+                  ? "bg-violet-500/20 text-[var(--dm-text)]"
+                  : "text-[var(--dm-text-muted)] hover:text-[var(--dm-text)]"
+              }`}
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>PDFs ({indexedDocs.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidebarTab("history")}
+              className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                sidebarTab === "history"
+                  ? "bg-violet-500/20 text-[var(--dm-text)]"
+                  : "text-[var(--dm-text-muted)] hover:text-[var(--dm-text)]"
+              }`}
+            >
+              <History className="w-3.5 h-3.5" />
+              <span>History ({history.length})</span>
+            </button>
           </div>
 
-          {loadingInit ? (
-            <div className="h-24 rounded bg-light-surface-container dark:bg-dark-surface-container animate-pulse" />
-          ) : documents.length === 0 ? (
-            <div className="p-gutter-md rounded bg-light-surface-container-lowest dark:bg-dark-surface-container border border-light-outline-variant/60 dark:border-dark-outline-variant/60 flex flex-col gap-gutter-sm">
-              <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                No PDFs uploaded yet. Upload documents to ask grounded questions.
-              </p>
-              <button
-                type="button"
-                onClick={() => onNavigate("documents")}
-                className="px-3 py-1.5 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary font-label text-label-md hover:bg-light-primary-container"
-              >
-                Upload PDFs
-              </button>
+          {sidebarTab === "documents" ? (
+            <div className="flex-1 flex flex-col gap-2.5 overflow-y-auto">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-medium text-[var(--dm-text-secondary)]">Retrieval Scope</span>
+                <span className="font-mono text-cyan-700 dark:text-cyan-300 tabular-nums">
+                  {selectedIndexedDocs.length} active
+                </span>
+              </div>
+
+              {loadingInit ? (
+                <div className="space-y-2">
+                  <div className="h-14 rounded-xl bg-slate-900/5 dark:bg-white/5 animate-pulse" />
+                  <div className="h-14 rounded-xl bg-slate-900/5 dark:bg-white/5 animate-pulse" />
+                </div>
+              ) : documents.length === 0 ? (
+                <div className="dm-card p-4 flex flex-col gap-3">
+                  <p className="text-xs text-[var(--dm-text-muted)] leading-relaxed">
+                    No PDFs uploaded yet. Upload a document to start grounded Q&amp;A.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate("documents")}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 text-white text-xs font-semibold"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Upload PDFs</span>
+                  </button>
+                </div>
+              ) : (
+                documents.map((doc) => {
+                  const isIndexed = doc.status === "Indexed Successfully";
+                  const checked = isIndexed && selectedDocIds.includes(doc.id);
+                  return (
+                    <label
+                      key={doc.id}
+                      className={`p-3 rounded-xl border transition-colors flex items-start gap-2.5 ${
+                        checked
+                          ? "bg-violet-500/10 border-violet-400/45"
+                          : "bg-[var(--dm-surface)] border-[var(--dm-border)]"
+                      } ${isIndexed ? "cursor-pointer" : "opacity-55 cursor-not-allowed"}`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={!isIndexed}
+                        checked={checked}
+                        onChange={() => toggleDoc(doc.id)}
+                        className="mt-0.5 rounded accent-violet-500"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-[var(--dm-text)] truncate">
+                          {doc.filename}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-[var(--dm-text-muted)] tabular-nums">
+                          {doc.pages || 0} pages · {doc.chunks_count || 0} chunks
+                        </p>
+                      </div>
+                    </label>
+                  );
+                })
+              )}
             </div>
           ) : (
-            <div className="flex flex-col gap-gutter-sm">
-              {documents.map((doc) => {
-                const isIndexed = doc.status === "Indexed Successfully";
-                const checked = isIndexed && selectedDocIds.includes(doc.id);
-                return (
-                  <label
-                    key={doc.id}
-                    className={`flex items-start gap-gutter-sm p-gutter-sm rounded bg-light-surface-container-lowest dark:bg-dark-surface-container border ${
-                      checked
-                        ? "border-light-primary/60 dark:border-dark-primary/60"
-                        : "border-light-outline-variant/60 dark:border-dark-outline-variant/60"
-                    } ${isIndexed ? "cursor-pointer" : "opacity-60 cursor-not-allowed"}`}
+            <div className="flex-1 flex flex-col gap-2 overflow-y-auto">
+              {history.length === 0 ? (
+                <div className="dm-card p-4 text-xs text-[var(--dm-text-muted)] text-center">
+                  Your past Q&amp;A turns will appear here once you ask your first question.
+                </div>
+              ) : (
+                history.map((turn) => (
+                  <button
+                    key={turn.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveSources(turn.sources || []);
+                      setHighlightedChunkId(turn.sources?.[0]?.chunk_id ?? null);
+                      setShowSourcesPanel(true);
+                      setMobileTab("chat");
+                    }}
+                    className="text-left p-3 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] hover:border-cyan-400/40 transition-colors flex flex-col gap-1"
                   >
-                    <input
-                      type="checkbox"
-                      disabled={!isIndexed}
-                      checked={checked}
-                      onChange={() => toggleDoc(doc.id)}
-                      className="mt-0.5 rounded text-light-primary focus:ring-light-primary"
-                    />
-                    <div className="min-w-0">
-                      <p className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface truncate">
-                        {doc.filename}
-                      </p>
-                      <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant tabular-nums">
-                        {doc.pages || 0} pages · {doc.status}
-                      </p>
-                    </div>
-                  </label>
-                );
-              })}
+                    <span className="text-xs font-medium text-[var(--dm-text)] line-clamp-2">
+                      {turn.question}
+                    </span>
+                    <span className="font-mono text-[11px] text-[var(--dm-text-muted)] tabular-nums">
+                      {turn.sources.length} sources cited
+                    </span>
+                  </button>
+                ))
+              )}
             </div>
           )}
-        </section>
+        </aside>
 
-        {/* Central Chat Conversation Area */}
+        {/* Central Chat Area */}
         <section
-          aria-label="Chat Conversation"
+          aria-label="AI Chat Conversation"
           className={`${
+            mobileTab === "chat" ? "flex" : "hidden lg:flex"
+          } ${
             showSourcesPanel ? "lg:col-span-6" : "lg:col-span-9"
-          } flex flex-col justify-between bg-light-surface dark:bg-dark-surface`}
+          } flex-col justify-between bg-[var(--dm-bg)]`}
         >
-          <div className="flex-1 p-gutter-md lg:p-gutter-lg flex flex-col gap-gutter-lg overflow-y-auto max-h-[calc(100vh-14rem)]">
-            {/* Welcome Guidance Card */}
+          <div className="flex-1 p-4 sm:p-6 flex flex-col gap-5 overflow-y-auto max-h-[calc(100vh-14.5rem)]">
             {history.length === 0 && !asking && (
-              <div className="flex items-start gap-gutter-sm max-w-2xl">
-                <div className="w-8 h-8 rounded-md bg-gradient-to-br from-light-primary to-light-secondary flex items-center justify-center text-light-on-primary shrink-0">
-                  <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                    smart_toy
-                  </span>
+              <div className="my-auto max-w-xl mx-auto text-center py-8 flex flex-col items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-violet-500/20 to-cyan-500/20 border border-violet-400/35 text-cyan-700 dark:text-cyan-300 flex items-center justify-center">
+                  <Sparkles className="w-6 h-6" aria-hidden="true" />
                 </div>
-                <div className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-md shadow-sm flex flex-col gap-gutter-xs">
-                  <span className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface">
-                    DocuMind Assistant
-                  </span>
-                  <p className="font-body text-body-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                    Select one or more indexed PDFs on the left and ask any question. Every response is
-                    generated live by Gemini using retrieved passages and includes page-level source
-                    citations.
-                  </p>
-                </div>
+                <h2 className="font-display text-2xl font-bold text-[var(--dm-text)] text-balance">
+                  Ask anything about your documents.
+                </h2>
+                <p className="text-sm text-[var(--dm-text-muted)] leading-relaxed">
+                  Select indexed PDFs on the left and enter a question below. DocuMind retrieves the
+                  top {preferences.topK} semantic chunks and synthesizes a Gemini response with
+                  clickable page citations.
+                </p>
               </div>
             )}
 
             {history.map((turn) => (
               <React.Fragment key={turn.id}>
                 {/* User Message */}
-                <div className="flex items-start justify-end gap-gutter-sm">
-                  <div className="bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container rounded-md px-gutter-md py-3 max-w-xl shadow-sm">
-                    <p className="font-body text-body-md whitespace-pre-wrap">{turn.question}</p>
+                <div className="flex justify-end">
+                  <div className="max-w-xl rounded-2xl rounded-tr-sm px-4 py-3 bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm">
+                    <p className="text-sm whitespace-pre-wrap leading-relaxed">{turn.question}</p>
                   </div>
                 </div>
 
-                {/* AI Response with Expandable Citations */}
-                <div className="flex items-start gap-gutter-sm max-w-2xl">
-                  <div className="w-8 h-8 rounded-md bg-gradient-to-br from-light-primary to-light-secondary flex items-center justify-center text-light-on-primary shrink-0">
-                    <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                      smart_toy
-                    </span>
+                {/* Assistant Message */}
+                <div className="flex items-start gap-3 max-w-2xl">
+                  <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-500/25 border border-violet-400/35 text-cyan-700 dark:text-cyan-300 flex items-center justify-center shrink-0 mt-0.5">
+                    <MessageSquareText className="w-4 h-4" aria-hidden="true" />
                   </div>
-                  <div className="flex-1 bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-md shadow-sm flex flex-col gap-gutter-md">
-                    <div className="flex items-center justify-between gap-gutter-sm">
-                      <span className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface">
+
+                  <div className="flex-1 dm-card p-4 sm:p-5 flex flex-col gap-3.5 min-w-0">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-display font-semibold text-[var(--dm-text)]">
                         DocuMind Assistant
                       </span>
-                      <span className="font-label text-label-sm text-light-secondary dark:text-dark-secondary tabular-nums">
+                      <span className="font-mono text-[11px] text-cyan-700 dark:text-cyan-300 tabular-nums">
                         {turn.sources.length} source{turn.sources.length === 1 ? "" : "s"} retrieved
                       </span>
                     </div>
 
-                    <div className="font-body text-body-md text-light-on-surface dark:text-dark-on-surface whitespace-pre-wrap">
-                      {turn.answer}
-                    </div>
+                    <MarkdownRenderer
+                      content={turn.answer}
+                      sources={turn.sources}
+                      onSelectCitation={(chunk) => handleCitationSelect(chunk, turn.sources)}
+                    />
 
+                    {/* Expandable Retrieved Passages */}
                     {turn.sources.length > 0 && (
-                      <div className="flex flex-col gap-gutter-xs">
+                      <div className="space-y-1.5 pt-1">
                         {turn.sources.map((src, idx) => (
                           <details
                             key={src.chunk_id}
-                            className="bg-light-surface-container-low dark:bg-dark-surface-container border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded p-gutter-sm"
+                            className="rounded-xl bg-[var(--dm-bg-secondary)]/80 border border-[var(--dm-border)] px-3 py-2"
                           >
-                            <summary className="cursor-pointer font-label text-label-md text-light-primary dark:text-dark-primary flex items-center justify-between gap-gutter-sm">
+                            <summary className="cursor-pointer text-xs font-medium text-[var(--dm-text-secondary)] flex items-center justify-between gap-2">
                               <span className="truncate">
                                 Source {idx + 1}: {src.filename} · Page {src.page_number}
                               </span>
-                              <span className="font-mono text-mono-sm text-light-secondary dark:text-dark-secondary shrink-0 tabular-nums">
-                                Score: {(src.similarity * 100).toFixed(1)}%
+                              <span className="font-mono text-[11px] text-cyan-700 dark:text-cyan-300 shrink-0 tabular-nums">
+                                {(src.similarity * 100).toFixed(1)}%
                               </span>
                             </summary>
-                            <p className="mt-gutter-sm pt-gutter-sm border-t border-light-outline-variant/40 dark:border-dark-outline-variant/40 font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
+                            <p className="mt-2 pt-2 border-t border-[var(--dm-border)] text-xs text-[var(--dm-text-muted)] leading-relaxed">
                               {src.text}
                             </p>
                           </details>
@@ -327,80 +493,94 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                       </div>
                     )}
 
-                    <div className="flex items-center justify-between pt-gutter-xs border-t border-light-outline-variant/40 dark:border-dark-outline-variant/40">
-                      <div className="flex items-center gap-gutter-xs">
-                        <button
-                          type="button"
-                          onClick={() => handleCopy(turn.id, turn.answer)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container dark:hover:bg-dark-surface-container font-label text-label-sm whitespace-nowrap"
-                        >
-                          <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
-                            content_copy
-                          </span>
-                          <span>{copiedId === turn.id ? "Copied" : "Copy answer"}</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={asking}
-                          onClick={() => submitQuestion(turn.question)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container dark:hover:bg-dark-surface-container font-label text-label-sm disabled:opacity-50 whitespace-nowrap"
-                        >
-                          <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
-                            refresh
-                          </span>
-                          <span>Regenerate</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActiveSources(turn.sources);
-                            setShowSourcesPanel(true);
-                          }}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-light-primary dark:text-dark-primary hover:bg-light-surface-container dark:hover:bg-dark-surface-container font-label text-label-sm whitespace-nowrap"
-                        >
-                          <span>Focus Sources</span>
-                        </button>
-                      </div>
+                    {/* Message Actions */}
+                    <div className="pt-2.5 border-t border-[var(--dm-border)] flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleCopy(turn.id, turn.answer)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/5 transition-colors"
+                      >
+                        {copiedId === turn.id ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-700 dark:text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                        <span>{copiedId === turn.id ? "Copied" : "Copy answer"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={asking}
+                        onClick={() => submitQuestion(turn.question)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/5 disabled:opacity-40 transition-colors"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Regenerate</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveSources(turn.sources);
+                          setHighlightedChunkId(turn.sources?.[0]?.chunk_id ?? null);
+                          setShowSourcesPanel(true);
+                          setMobileTab("sources");
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:bg-cyan-500/10 transition-colors"
+                      >
+                        <BookOpen className="w-3.5 h-3.5" />
+                        <span>Inspect Sources</span>
+                      </button>
                     </div>
                   </div>
                 </div>
               </React.Fragment>
             ))}
 
+            {/* Animated Typing Indicator */}
             {asking && (
-              <div className="flex items-center gap-gutter-sm text-light-secondary dark:text-dark-secondary">
-                <span className="material-symbols-outlined animate-spin text-[18px]" aria-hidden="true">
-                  progress_activity
-                </span>
-                <span className="font-label text-label-md">
-                  Retrieving top passages and generating grounded Gemini response...
-                </span>
+              <div className="flex items-start gap-3 max-w-md">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-500/25 border border-violet-400/35 text-cyan-700 dark:text-cyan-300 flex items-center justify-center shrink-0">
+                  <MessageSquareText className="w-4 h-4" aria-hidden="true" />
+                </div>
+                <div className="dm-card px-4 py-3 flex items-center gap-3">
+                  <div className="flex items-center gap-1" aria-hidden="true">
+                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-dm-typing" />
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-dm-typing"
+                      style={{ animationDelay: "0.18s" }}
+                    />
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-dm-typing"
+                      style={{ animationDelay: "0.36s" }}
+                    />
+                  </div>
+                  <span className="text-xs text-[var(--dm-text-muted)]">
+                    Retrieving top {preferences.topK} chunks &amp; generating Gemini response...
+                  </span>
+                </div>
               </div>
             )}
 
             {error && (
               <div
                 role="alert"
-                className="p-gutter-md rounded bg-light-error-container dark:bg-dark-error-container text-light-on-error-container dark:text-dark-on-error-container flex items-center gap-gutter-sm"
+                className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300 flex items-center gap-2.5 text-xs sm:text-sm"
               >
-                <span className="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">
-                  error
-                </span>
-                <span className="font-body text-body-sm">{error}</span>
+                <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <span>{error}</span>
               </div>
             )}
             <div ref={bottomRef} />
           </div>
 
-          {/* Suggested Questions + Input Area */}
-          <div className="p-gutter-md border-t border-light-outline-variant/60 dark:border-dark-outline-variant/60 bg-light-surface-container-lowest dark:bg-dark-surface-container-lowest flex flex-col gap-gutter-sm">
-            <div className="flex flex-wrap gap-gutter-xs">
-              {SUGGESTED_PROMPTS.map((prompt) => (
+          {/* Suggested Prompts + Input Form */}
+          <div className="p-4 border-t border-[var(--dm-border)] bg-[var(--dm-bg-secondary)]/70 backdrop-blur-md flex flex-col gap-3">
+            <div className="flex flex-wrap gap-1.5">
+              {suggestedPrompts.map((prompt) => (
                 <button
                   key={prompt}
                   type="button"
                   onClick={() => setQuestionInput(prompt)}
-                  className="px-3 py-1 rounded bg-light-surface-container-low dark:bg-dark-surface-container border border-light-outline-variant/60 dark:border-dark-outline-variant/60 hover:border-light-primary font-label text-label-sm text-light-on-surface dark:text-dark-on-surface transition-colors duration-state-change"
+                  className="px-3 py-1.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] hover:border-violet-400/45 text-xs text-[var(--dm-text-secondary)] hover:text-[var(--dm-text)] transition-colors text-left"
                 >
                   {prompt}
                 </button>
@@ -412,75 +592,83 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                 e.preventDefault();
                 submitQuestion(questionInput);
               }}
-              className="flex items-center gap-gutter-sm"
+              className="flex items-center gap-2.5"
             >
               <input
                 type="text"
                 value={questionInput}
                 onChange={(e) => setQuestionInput(e.target.value)}
-                placeholder="Ask anything about your uploaded documents..."
-                className="flex-1 px-gutter-md py-2.5 rounded bg-light-surface-container-low dark:bg-dark-surface-container-low border border-light-outline-variant dark:border-dark-outline-variant text-light-on-surface dark:text-dark-on-surface placeholder:text-light-outline dark:placeholder:text-dark-outline font-body text-body-md focus:border-light-primary focus:ring-2 focus:ring-light-primary/20 focus:outline-none"
+                placeholder="Ask a question grounded in your selected PDFs..."
+                className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none"
               />
               <button
                 type="submit"
                 disabled={asking || !questionInput.trim()}
-                className="inline-flex items-center justify-center gap-gutter-xs px-gutter-md py-2.5 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container font-label text-label-lg hover:bg-light-primary-container transition-colors duration-state-change shadow-sm shrink-0 disabled:opacity-50 whitespace-nowrap"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all disabled:opacity-45 shrink-0 whitespace-nowrap"
               >
-                <span className="hidden sm:inline">{asking ? "Asking..." : "Send"}</span>
-                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                  send
-                </span>
+                <span className="hidden sm:inline">{asking ? "Thinking..." : "Send"}</span>
+                <Send className="w-4 h-4" />
               </button>
             </form>
-
-            <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant text-center">
-              Answers are generated using retrieved document content. Always verify important
-              information against the original source.
-            </p>
           </div>
         </section>
 
-        {/* Right Panel: Sources & Retrieved Context (Collapsible) */}
-        {showSourcesPanel && (
+        {/* Right Panel: Retrieved Sources & Citation Inspector */}
+        {(showSourcesPanel || mobileTab === "sources") && (
           <aside
-            aria-label="Retrieved Sources"
-            className="lg:col-span-3 bg-light-surface-container-low/50 dark:bg-dark-surface-container-low/50 border-t lg:border-t-0 lg:border-l border-light-outline-variant/60 dark:border-dark-outline-variant/60 p-gutter-md flex flex-col gap-gutter-md"
+            aria-label="Retrieved Document Sources"
+            className={`${
+              mobileTab === "sources" ? "flex" : "hidden"
+            } ${
+              showSourcesPanel ? "lg:flex" : "lg:hidden"
+            } lg:col-span-3 flex-col border-t lg:border-t-0 lg:border-l border-[var(--dm-border)] bg-[var(--dm-bg-secondary)]/55 p-4 gap-3.5`}
           >
             <div className="flex items-center justify-between">
-              <h2 className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface">
+              <h2 className="font-display text-sm font-semibold text-[var(--dm-text)]">
                 Retrieved Context
               </h2>
-              <span className="font-label text-label-sm text-light-secondary dark:text-dark-secondary tabular-nums">
+              <span className="font-mono text-xs text-cyan-700 dark:text-cyan-300 tabular-nums">
                 Top {activeSources.length || preferences.topK}
               </span>
             </div>
 
             {activeSources.length === 0 ? (
-              <div className="p-gutter-md rounded bg-light-surface-container-lowest dark:bg-dark-surface-container border border-light-outline-variant/60 dark:border-dark-outline-variant/60">
-                <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  Retrieved chunks and similarity scores will appear here when you ask a question.
-                </p>
+              <div className="dm-card p-4 text-xs text-[var(--dm-text-muted)] leading-relaxed">
+                Ask a question or click any citation badge in an answer to inspect the retrieved PDF
+                passages, page numbers, and similarity scores.
               </div>
             ) : (
-              <div className="flex flex-col gap-gutter-sm overflow-y-auto max-h-[calc(100vh-14rem)]">
-                {activeSources.map((src) => (
-                  <article
-                    key={src.chunk_id}
-                    className="bg-light-surface-container-lowest dark:bg-dark-surface-container border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded p-gutter-sm flex flex-col gap-gutter-xs"
-                  >
-                    <div className="flex items-center justify-between gap-gutter-xs">
-                      <span className="font-label text-label-sm text-light-primary dark:text-dark-primary truncate">
-                        {src.filename} · p. {src.page_number}
-                      </span>
-                      <span className="font-mono text-mono-sm text-light-secondary dark:text-dark-secondary shrink-0 tabular-nums">
-                        {(src.similarity * 100).toFixed(1)}%
-                      </span>
-                    </div>
-                    <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant line-clamp-5">
-                      {src.text}
-                    </p>
-                  </article>
-                ))}
+              <div className="flex-1 flex flex-col gap-2.5 overflow-y-auto max-h-[calc(100vh-14.5rem)]">
+                {activeSources.map((src) => {
+                  const isHighlighted = highlightedChunkId === src.chunk_id;
+                  return (
+                    <article
+                      key={src.chunk_id}
+                      onClick={() => setHighlightedChunkId(src.chunk_id)}
+                      className={`p-3.5 rounded-xl border cursor-pointer transition-all flex flex-col gap-2 ${
+                        isHighlighted
+                          ? "bg-cyan-500/10 border-cyan-400/55 shadow-[0_0_20px_-8px_rgba(34,211,238,0.65)]"
+                          : "bg-[var(--dm-surface)] border-[var(--dm-border)] hover:border-violet-400/40"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-semibold text-[var(--dm-text)] truncate">
+                          {src.filename}
+                        </span>
+                        <span className="font-mono text-[11px] text-cyan-700 dark:text-cyan-300 shrink-0 tabular-nums">
+                          {(src.similarity * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] font-mono text-[var(--dm-text-muted)]">
+                        <span>Page {src.page_number}</span>
+                        <span>Rank #{src.rank}</span>
+                      </div>
+                      <p className="text-xs text-[var(--dm-text-secondary)] leading-relaxed">
+                        {src.text}
+                      </p>
+                    </article>
+                  );
+                })}
               </div>
             )}
 
@@ -491,13 +679,24 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                 if (lastQ) onInspectQuery(lastQ);
                 onNavigate("retrieval");
               }}
-              className="mt-auto text-center px-3 py-2 rounded border border-light-outline-variant dark:border-dark-outline-variant bg-light-surface-container-lowest dark:bg-dark-surface-container font-label text-label-md text-light-primary dark:text-dark-primary hover:bg-light-surface-container-low transition-colors duration-state-change"
+              className="mt-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[var(--dm-border)] bg-[var(--dm-surface)] hover:border-violet-400/45 text-xs font-semibold text-cyan-700 dark:text-cyan-300 transition-colors"
             >
-              Inspect Full RAG Pipeline
+              <span>Inspect in Pipeline</span>
+              <ChevronRight className="w-4 h-4" />
             </button>
           </aside>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmClearOpen}
+        title="Clear Conversation History?"
+        description="This will remove all saved Q&A turns in your workspace history. Your uploaded PDFs and indexed vectors will remain intact."
+        confirmLabel="Clear History"
+        busy={clearing}
+        onCancel={() => setConfirmClearOpen(false)}
+        onConfirm={confirmClearChat}
+      />
     </AppShell>
   );
 };

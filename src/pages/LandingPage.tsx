@@ -1,12 +1,109 @@
 import React, { useState } from "react";
+import { motion } from "motion/react";
+import {
+  ArrowRight,
+  Binary,
+  ChevronRight,
+  Cpu,
+  Database,
+  FileText,
+  Layers,
+  Menu,
+  MessageSquareText,
+  Quote,
+  Search,
+  Sparkles,
+  X,
+} from "lucide-react";
 import { RoutePage } from "../types";
+import { DocuMindLogo } from "../components/DocuMindLogo";
 
 interface LandingPageProps {
   onNavigate: (page: RoutePage) => void;
 }
 
+interface PipelineNode {
+  id: string;
+  step: string;
+  title: string;
+  subtitle: string;
+  detail: string;
+  icon: React.ComponentType<{ className?: string }>;
+  accent: "violet" | "cyan";
+}
+
+const PIPELINE_NODES: PipelineNode[] = [
+  {
+    id: "pdf",
+    step: "01",
+    title: "PDF Documents",
+    subtitle: "Validated ingestion",
+    detail: "Multi-PDF upload up to 25 MB with binary verification and SHA-256 deduplication.",
+    icon: FileText,
+    accent: "violet",
+  },
+  {
+    id: "extract",
+    step: "02",
+    title: "Text Extraction",
+    subtitle: "Per-page parsing",
+    detail: "Extracts clean text page by page while preserving exact source filenames and page indices.",
+    icon: Layers,
+    accent: "cyan",
+  },
+  {
+    id: "chunk",
+    step: "03",
+    title: "Chunking",
+    subtitle: "500 tokens · 100 overlap",
+    detail: "Splits pages into overlapping semantic windows so cross-boundary concepts remain intact.",
+    icon: Cpu,
+    accent: "violet",
+  },
+  {
+    id: "embed",
+    step: "04",
+    title: "Embeddings",
+    subtitle: "Gemini Embedding-2",
+    detail: "Converts every chunk into dense semantic vectors stored in persistent disk storage.",
+    icon: Binary,
+    accent: "cyan",
+  },
+  {
+    id: "retrieve",
+    step: "05",
+    title: "Semantic Retrieval",
+    subtitle: "Cosine Top-K search",
+    detail: "Ranks stored chunk vectors against your embedded question to surface the closest evidence.",
+    icon: Search,
+    accent: "violet",
+  },
+  {
+    id: "answer",
+    step: "06",
+    title: "AI Answer",
+    subtitle: "Grounded Gemini output",
+    detail: "Synthesizes a citation-backed response grounded strictly in the retrieved passages.",
+    icon: MessageSquareText,
+    accent: "cyan",
+  },
+];
+
+const PARTICLES = [
+  { left: "8%", top: "20%", size: 4, delay: "0s" },
+  { left: "22%", top: "68%", size: 3, delay: "1.4s" },
+  { left: "44%", top: "16%", size: 5, delay: "2.2s" },
+  { left: "68%", top: "74%", size: 4, delay: "0.8s" },
+  { left: "84%", top: "24%", size: 3, delay: "3.1s" },
+  { left: "91%", top: "58%", size: 4, delay: "1.9s" },
+];
+
 export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [activeNodeId, setActiveNodeId] = useState<string>("retrieve");
+
+  const activeNode =
+    PIPELINE_NODES.find((n) => n.id === activeNodeId) || PIPELINE_NODES[4];
 
   const scrollToSection = (id: string) => {
     setMobileMenuOpen(false);
@@ -15,73 +112,77 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-light-surface dark:bg-dark-surface text-light-on-surface dark:text-dark-on-surface">
-      {/* Top Navigation */}
-      <header className="sticky top-0 z-30 bg-light-surface-container-lowest/95 dark:bg-dark-surface-container-lowest/95 backdrop-blur-sm border-b border-light-outline-variant/50 dark:border-dark-outline-variant/50">
-        <div className="max-w-7xl mx-auto px-gutter-md sm:px-gutter-lg lg:px-gutter-xl h-16 flex items-center justify-between gap-gutter-md">
+    <div className="min-h-screen flex flex-col bg-[var(--dm-bg)] text-[var(--dm-text)] relative overflow-x-hidden">
+      {/* Animated Atmospheric Background */}
+      <div aria-hidden="true" className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+        <div className="animate-dm-aurora absolute -top-48 left-1/4 w-[620px] h-[620px] rounded-full bg-violet-600/15 blur-[140px]" />
+        <div className="animate-dm-aurora absolute top-1/3 right-0 w-[520px] h-[520px] rounded-full bg-cyan-500/10 blur-[140px]" />
+        <div
+          className="absolute inset-0 opacity-[0.035]"
+          style={{
+            backgroundImage:
+              "linear-gradient(to right, rgba(148,163,184,0.6) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.6) 1px, transparent 1px)",
+            backgroundSize: "56px 56px",
+          }}
+        />
+        {PARTICLES.map((p, idx) => (
+          <span
+            key={idx}
+            style={{
+              left: p.left,
+              top: p.top,
+              width: `${p.size}px`,
+              height: `${p.size}px`,
+              animationDelay: p.delay,
+            }}
+            className="animate-dm-float absolute rounded-full bg-cyan-300/60 shadow-[0_0_12px_rgba(34,211,238,0.6)]"
+          />
+        ))}
+      </div>
+
+      {/* Top Navigation (3-zone contract) */}
+      <header className="sticky top-0 z-30 bg-[var(--dm-bg)]/80 backdrop-blur-xl border-b border-[var(--dm-border)]">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
           <button
             type="button"
-            onClick={() => scrollToSection("home")}
-            className="flex items-center gap-gutter-sm focus-visible:outline-2 focus-visible:outline-light-primary rounded text-left whitespace-nowrap shrink-0"
+            onClick={() => scrollToSection("hero")}
+            className="focus-visible:outline-2 focus-visible:outline-violet-400 rounded-lg whitespace-nowrap shrink-0"
           >
-            <div className="w-9 h-9 rounded-md bg-gradient-to-br from-light-primary to-light-secondary flex items-center justify-center text-light-on-primary shadow-sm">
-              <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
-                psychology
-              </span>
-            </div>
-            <span className="font-headline text-title-md text-light-on-surface dark:text-dark-on-surface leading-none">
-              DocuMind
-            </span>
+            <DocuMindLogo />
           </button>
 
-          <nav aria-label="Primary" className="hidden md:flex items-center gap-gutter-xl">
-            <button
-              type="button"
-              onClick={() => scrollToSection("home")}
-              className="font-label text-label-lg text-light-on-surface dark:text-dark-on-surface hover:text-light-primary dark:hover:text-dark-primary transition-colors duration-state-change whitespace-nowrap shrink-0"
-            >
-              Home
-            </button>
+          <nav aria-label="Primary" className="hidden md:flex items-center gap-8">
             <button
               type="button"
               onClick={() => scrollToSection("features")}
-              className="font-label text-label-lg text-light-on-surface-variant dark:text-dark-on-surface-variant hover:text-light-primary dark:hover:text-dark-primary transition-colors duration-state-change whitespace-nowrap shrink-0"
+              className="text-sm font-medium text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] transition-colors whitespace-nowrap shrink-0"
             >
               Features
             </button>
             <button
               type="button"
               onClick={() => scrollToSection("how-it-works")}
-              className="font-label text-label-lg text-light-on-surface-variant dark:text-dark-on-surface-variant hover:text-light-primary dark:hover:text-dark-primary transition-colors duration-state-change whitespace-nowrap shrink-0"
+              className="text-sm font-medium text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] transition-colors whitespace-nowrap shrink-0"
             >
               How It Works
             </button>
             <button
               type="button"
-              onClick={() => scrollToSection("about")}
-              className="font-label text-label-lg text-light-on-surface-variant dark:text-dark-on-surface-variant hover:text-light-primary dark:hover:text-dark-primary transition-colors duration-state-change whitespace-nowrap shrink-0"
+              onClick={() => scrollToSection("technology")}
+              className="text-sm font-medium text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] transition-colors whitespace-nowrap shrink-0"
             >
-              About
+              Technology
             </button>
           </nav>
 
-          <div className="hidden md:flex items-center gap-gutter-sm shrink-0">
+          <div className="hidden md:flex items-center shrink-0">
             <button
               type="button"
               onClick={() => onNavigate("dashboard")}
-              className="inline-flex items-center justify-center px-gutter-md py-2 rounded bg-light-surface-container-lowest dark:bg-dark-surface-container-low text-light-on-surface dark:text-dark-on-surface border border-light-outline-variant dark:border-dark-outline-variant font-label text-label-lg hover:bg-light-surface-container-low dark:hover:bg-dark-surface-container transition-colors duration-state-change whitespace-nowrap shrink-0"
-            >
-              Open Workspace
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigate("documents")}
-              className="inline-flex items-center justify-center gap-gutter-xs px-gutter-md py-2 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container font-label text-label-lg hover:bg-light-primary-container transition-colors duration-state-change shadow-sm whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold shadow-[0_8px_24px_-8px_rgba(139,92,246,0.7)] transition-all duration-150 whitespace-nowrap shrink-0"
             >
               <span>Get Started</span>
-              <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                arrow_forward
-              </span>
+              <ArrowRight className="w-4 h-4" />
             </button>
           </div>
 
@@ -90,300 +191,344 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
             onClick={() => setMobileMenuOpen((prev) => !prev)}
             aria-label="Toggle navigation menu"
             aria-expanded={mobileMenuOpen}
-            className="md:hidden inline-flex items-center justify-center w-10 h-10 rounded text-light-on-surface dark:text-dark-on-surface hover:bg-light-surface-container dark:hover:bg-dark-surface-container transition-colors duration-state-change"
+            className="md:hidden inline-flex items-center justify-center w-10 h-10 rounded-xl border border-[var(--dm-border)] text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/5"
           >
-            <span className="material-symbols-outlined text-[24px]">
-              {mobileMenuOpen ? "close" : "menu"}
-            </span>
+            {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
         </div>
 
-        {/* Mobile Menu */}
         {mobileMenuOpen && (
-          <div className="md:hidden border-t border-light-outline-variant/50 dark:border-dark-outline-variant/50 bg-light-surface-container-lowest dark:bg-dark-surface-container-lowest px-gutter-md py-gutter-md">
-            <nav className="flex flex-col gap-gutter-sm">
-              <button
-                type="button"
-                onClick={() => scrollToSection("home")}
-                className="text-left px-gutter-sm py-2 rounded font-label text-label-lg text-light-on-surface dark:text-dark-on-surface hover:bg-light-surface-container-low dark:hover:bg-dark-surface-container-low"
-              >
-                Home
-              </button>
+          <div className="md:hidden border-t border-[var(--dm-border)] bg-[var(--dm-bg-secondary)]/95 backdrop-blur-xl px-4 py-4">
+            <nav className="flex flex-col gap-2">
               <button
                 type="button"
                 onClick={() => scrollToSection("features")}
-                className="text-left px-gutter-sm py-2 rounded font-label text-label-lg text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container-low dark:hover:bg-dark-surface-container-low"
+                className="text-left px-3 py-2.5 rounded-xl text-sm font-medium text-[var(--dm-text-secondary)] hover:bg-slate-900/5 dark:hover:bg-white/5"
               >
                 Features
               </button>
               <button
                 type="button"
                 onClick={() => scrollToSection("how-it-works")}
-                className="text-left px-gutter-sm py-2 rounded font-label text-label-lg text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container-low dark:hover:bg-dark-surface-container-low"
+                className="text-left px-3 py-2.5 rounded-xl text-sm font-medium text-[var(--dm-text-secondary)] hover:bg-slate-900/5 dark:hover:bg-white/5"
               >
                 How It Works
               </button>
               <button
                 type="button"
-                onClick={() => scrollToSection("about")}
-                className="text-left px-gutter-sm py-2 rounded font-label text-label-lg text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container-low dark:hover:bg-dark-surface-container-low"
+                onClick={() => scrollToSection("technology")}
+                className="text-left px-3 py-2.5 rounded-xl text-sm font-medium text-[var(--dm-text-secondary)] hover:bg-slate-900/5 dark:hover:bg-white/5"
               >
-                About
+                Technology
               </button>
-              <div className="pt-gutter-sm border-t border-light-outline-variant/50 dark:border-dark-outline-variant/50 flex flex-col gap-gutter-sm">
-                <button
-                  type="button"
-                  onClick={() => onNavigate("dashboard")}
-                  className="w-full text-center px-gutter-md py-2.5 rounded border border-light-outline-variant dark:border-dark-outline-variant font-label text-label-lg text-light-on-surface dark:text-dark-on-surface"
-                >
-                  Open Workspace
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onNavigate("documents")}
-                  className="w-full text-center px-gutter-md py-2.5 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container font-label text-label-lg"
-                >
-                  Get Started
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => onNavigate("dashboard")}
+                className="mt-2 w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 text-white text-sm font-semibold"
+              >
+                <span>Get Started</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
             </nav>
           </div>
         )}
       </header>
 
-      <main className="flex-1">
+      <main className="relative z-10 flex-1">
         {/* Hero Section */}
-        <section
-          id="home"
-          className="relative overflow-hidden bg-gradient-to-b from-light-surface-container-low/60 dark:from-dark-surface-container-low/60 to-light-surface dark:to-dark-surface py-section"
-        >
-          <div className="max-w-7xl mx-auto px-gutter-md sm:px-gutter-lg lg:px-gutter-xl grid grid-cols-1 lg:grid-cols-12 gap-gutter-xl items-center">
-            <div className="lg:col-span-6 flex flex-col gap-gutter-lg">
-              <div className="flex items-center gap-gutter-sm text-light-secondary dark:text-dark-secondary font-label text-label-md">
-                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                  auto_awesome
-                </span>
-                <span>Retrieval-Augmented Generation Platform</span>
+        <section id="hero" className="pt-14 pb-16 sm:pt-20 sm:pb-24">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <motion.div
+              initial={{ opacity: 0, y: 14 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+              className="max-w-3xl mx-auto text-center flex flex-col items-center gap-6"
+            >
+              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-violet-500/10 border border-violet-400/30 text-xs font-medium text-cyan-700 dark:text-cyan-300">
+                <Sparkles className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400" aria-hidden="true" />
+                <span>AI-Powered Document Intelligence</span>
               </div>
 
-              <h1 className="font-display text-display-lg-mobile lg:text-display-lg text-light-on-surface dark:text-dark-on-surface text-balance">
-                Chat With Your Documents, Not Just AI.
+              <h1 className="font-display font-bold text-4xl sm:text-5xl lg:text-[56px] lg:leading-[1.08] tracking-tight text-[var(--dm-text)] text-balance">
+                Your Documents.{" "}
+                <span className="bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-600 dark:from-violet-400 dark:via-indigo-300 dark:to-cyan-300 bg-clip-text text-transparent">
+                  Understood by AI.
+                </span>
               </h1>
 
-              <p className="font-body text-body-lg text-light-on-surface-variant dark:text-dark-on-surface-variant text-pretty max-w-prose">
-                Your Documents. Your Knowledge. One Intelligent Assistant. Upload dense PDFs, research
-                papers, or internal reports and receive accurate, citation-backed answers grounded
-                strictly in your files.
+              <p className="text-base sm:text-lg text-[var(--dm-text-muted)] max-w-2xl leading-relaxed text-pretty">
+                Upload complex PDFs and query your private knowledge base using Retrieval-Augmented
+                Generation. DocuMind embeds every passage, retrieves the most relevant context by
+                semantic similarity, and delivers citation-backed answers you can verify in one click.
               </p>
 
-              <div className="flex flex-wrap items-center gap-gutter-md">
+              <div className="flex flex-wrap items-center justify-center gap-3.5 pt-1">
+                <button
+                  type="button"
+                  onClick={() => onNavigate("dashboard")}
+                  className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold shadow-[0_12px_32px_-10px_rgba(139,92,246,0.75)] transition-all duration-150 whitespace-nowrap shrink-0"
+                >
+                  <span>Start Exploring</span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => scrollToSection("how-it-works")}
+                  className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[var(--dm-surface)] hover:bg-[var(--dm-surface-elevated)] border border-[var(--dm-border)] text-sm font-semibold text-[var(--dm-text)] transition-colors duration-150 whitespace-nowrap shrink-0"
+                >
+                  <span>Discover How It Works</span>
+                </button>
+              </div>
+            </motion.div>
+
+            {/* Interactive Animated RAG Pipeline Illustration */}
+            <motion.div
+              id="how-it-works"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: 0.12, ease: [0.16, 1, 0.3, 1] }}
+              className="mt-14 dm-card dm-glow-border p-5 sm:p-8 relative overflow-hidden"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+                <div>
+                  <h2 className="font-display text-base sm:text-lg font-semibold text-[var(--dm-text)]">
+                    Live Retrieval-Augmented Generation Flow
+                  </h2>
+                  <p className="text-xs sm:text-sm text-[var(--dm-text-muted)]">
+                    Select any stage below to inspect how DocuMind transforms raw PDFs into verified answers.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onNavigate("retrieval")}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:text-cyan-600 dark:hover:text-cyan-200 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <span>Open Pipeline Inspector</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Connected Animated Pipeline Nodes */}
+              <div className="relative">
+                {/* Desktop Animated SVG Connector Track */}
+                <svg
+                  aria-hidden="true"
+                  className="hidden lg:block absolute top-11 left-8 right-8 w-[calc(100%-4rem)] h-6 pointer-events-none z-0"
+                  preserveAspectRatio="none"
+                  viewBox="0 0 1000 24"
+                >
+                  <line
+                    x1="0"
+                    y1="12"
+                    x2="1000"
+                    y2="12"
+                    stroke="rgba(148, 163, 184, 0.2)"
+                    strokeWidth="2"
+                  />
+                  <line
+                    x1="0"
+                    y1="12"
+                    x2="1000"
+                    y2="12"
+                    stroke="url(#dmPipeGradient)"
+                    strokeWidth="2.5"
+                    className="animate-dm-flow"
+                  />
+                  <defs>
+                    <linearGradient id="dmPipeGradient" x1="0" y1="0" x2="1000" y2="0" gradientUnits="userSpaceOnUse">
+                      <stop stopColor="#8B5CF6" />
+                      <stop offset="0.5" stopColor="#22D3EE" />
+                      <stop offset="1" stopColor="#8B5CF6" />
+                    </linearGradient>
+                  </defs>
+                </svg>
+
+                <div className="relative z-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+                  {PIPELINE_NODES.map((node, index) => {
+                    const Icon = node.icon;
+                    const selected = node.id === activeNode.id;
+                    const accentRing =
+                      node.accent === "violet"
+                        ? "border-violet-400/55 shadow-[0_0_24px_-8px_rgba(139,92,246,0.75)]"
+                        : "border-cyan-400/55 shadow-[0_0_24px_-8px_rgba(34,211,238,0.7)]";
+                    const iconBox =
+                      node.accent === "violet"
+                        ? "bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-400/30"
+                        : "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border-cyan-400/30";
+
+                    return (
+                      <motion.button
+                        key={node.id}
+                        type="button"
+                        onClick={() => setActiveNodeId(node.id)}
+                        whileHover={{ y: -2 }}
+                        transition={{ duration: 0.16 }}
+                        className={`text-left p-4 rounded-2xl border transition-all duration-150 flex flex-col gap-3 ${
+                          selected
+                            ? `bg-[var(--dm-surface-elevated)] ${accentRing}`
+                            : "bg-[var(--dm-bg-secondary)]/80 border-[var(--dm-border)] hover:border-violet-400/35"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span
+                            className={`w-9 h-9 rounded-xl border flex items-center justify-center ${iconBox}`}
+                          >
+                            <Icon className="w-4 h-4" />
+                          </span>
+                          <span className="font-mono text-[11px] text-[var(--dm-text-muted)] tabular-nums">
+                            {node.step}
+                          </span>
+                        </div>
+                        <div>
+                          <p className="font-display text-sm font-semibold text-[var(--dm-text)]">
+                            {node.title}
+                          </p>
+                          <p className="text-xs text-[var(--dm-text-muted)] mt-0.5">
+                            {node.subtitle}
+                          </p>
+                        </div>
+                        {index < PIPELINE_NODES.length - 1 && (
+                          <span className="sr-only">connects to next stage</span>
+                        )}
+                      </motion.button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Active Stage Explanation Strip */}
+              <div className="mt-5 pt-5 border-t border-[var(--dm-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <span className="font-mono text-xs text-cyan-700 dark:text-cyan-300 pt-0.5 tabular-nums">
+                    Stage {activeNode.step}
+                  </span>
+                  <p className="text-sm text-[var(--dm-text-secondary)]">
+                    <strong className="font-semibold text-[var(--dm-text)]">
+                      {activeNode.title}:
+                    </strong>{" "}
+                    {activeNode.detail}
+                  </p>
+                </div>
                 <button
                   type="button"
                   onClick={() => onNavigate("documents")}
-                  className="inline-flex items-center justify-center gap-gutter-sm px-gutter-lg py-2.5 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container font-label text-label-lg hover:bg-light-primary-container transition-colors duration-state-change shadow-sm whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 border border-violet-400/30 text-xs font-semibold text-violet-700 dark:text-violet-200 transition-colors whitespace-nowrap shrink-0"
                 >
-                  <span>Upload PDFs &amp; Start</span>
-                  <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                    arrow_forward
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onNavigate("compare")}
-                  className="inline-flex items-center justify-center gap-gutter-sm px-gutter-lg py-2.5 rounded bg-light-surface-container-lowest dark:bg-dark-surface-container-low text-light-on-surface dark:text-dark-on-surface border border-light-outline-variant dark:border-dark-outline-variant font-label text-label-lg hover:bg-light-surface-container-low dark:hover:bg-dark-surface-container transition-colors duration-state-change whitespace-nowrap shrink-0"
-                >
-                  <span>Compare RAG vs. Standard LLM</span>
+                  <span>Try with a PDF</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               </div>
-
-              <div className="flex flex-wrap items-center gap-gutter-lg pt-gutter-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                <div className="flex items-center gap-gutter-xs">
-                  <span className="material-symbols-outlined text-light-primary dark:text-dark-primary text-[18px]" aria-hidden="true">
-                    verified
-                  </span>
-                  <span className="font-label text-label-md">Page-Level Citations</span>
-                </div>
-                <div className="flex items-center gap-gutter-xs">
-                  <span className="material-symbols-outlined text-light-secondary dark:text-dark-secondary text-[18px]" aria-hidden="true">
-                    hub
-                  </span>
-                  <span className="font-label text-label-md">Vector Semantic Search</span>
-                </div>
-                <div className="flex items-center gap-gutter-xs">
-                  <span className="material-symbols-outlined text-light-primary dark:text-dark-primary text-[18px]" aria-hidden="true">
-                    lock
-                  </span>
-                  <span className="font-label text-label-md">Private Workspace</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="lg:col-span-6">
-              <div className="bg-light-surface-container-lowest dark:bg-dark-surface-container-lowest border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-lg p-gutter-md shadow-sm">
-                <img
-                  src="/images/documind-hero.png"
-                  alt="DocuMind RAG architecture and document intelligence workspace preview"
-                  className="w-full h-auto rounded object-cover"
-                />
-              </div>
-            </div>
+            </motion.div>
           </div>
         </section>
 
-        {/* Features Section */}
-        <section id="features" className="py-section border-t border-light-outline-variant/40 dark:border-dark-outline-variant/40">
-          <div className="max-w-7xl mx-auto px-gutter-md sm:px-gutter-lg lg:px-gutter-xl">
-            <div className="max-w-2xl mb-gutter-xl">
-              <h2 className="font-headline text-headline-lg-mobile lg:text-headline-lg text-light-on-surface dark:text-dark-on-surface mb-gutter-sm text-balance">
-                Built for Fast, Verifiable Document Understanding
+        {/* Compact Features Section */}
+        <section id="features" className="py-16 border-t border-[var(--dm-border)]">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="max-w-2xl mb-10">
+              <h2 className="font-display text-2xl sm:text-3xl font-bold text-[var(--dm-text)] text-balance">
+                Designed for Grounded Document Intelligence
               </h2>
-              <p className="font-body text-body-md text-light-on-surface-variant dark:text-dark-on-surface-variant text-pretty">
-                Every capability is designed to eliminate hallucinations and keep your answers anchored to
-                exact source passages.
+              <p className="mt-2.5 text-sm sm:text-base text-[var(--dm-text-muted)]">
+                Every response is anchored to verifiable passages extracted directly from your files.
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-gutter-lg items-stretch">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5 items-stretch">
               {[
                 {
-                  icon: "upload_file",
-                  accent: "text-light-primary dark:text-dark-primary",
-                  title: "Smart PDF Upload",
-                  desc: "Drag-and-drop multiple PDFs with automated text extraction, 500-token chunking, and live embedding status tracking.",
+                  icon: FileText,
+                  title: "Intelligent PDF Understanding",
+                  desc: "Upload multi-page PDFs with automated text extraction, overlapping chunking, and real-time indexing status.",
+                  tone: "text-violet-700 dark:text-violet-300 bg-violet-500/15 border-violet-400/25",
                 },
                 {
-                  icon: "manage_search",
-                  accent: "text-light-secondary dark:text-dark-secondary",
-                  title: "Intelligent Document Search",
-                  desc: "Semantic vector search surfaces the top relevant passages across hundreds of pages with cosine similarity scores.",
+                  icon: Search,
+                  title: "Semantic Search",
+                  desc: "Dense vector embeddings and cosine similarity surface the top relevant passages beyond exact keyword matching.",
+                  tone: "text-cyan-700 dark:text-cyan-300 bg-cyan-500/15 border-cyan-400/25",
                 },
                 {
-                  icon: "forum",
-                  accent: "text-light-primary dark:text-dark-primary",
+                  icon: MessageSquareText,
                   title: "Context-Aware AI Answers",
-                  desc: "Ask follow-up questions, summarize findings, or compare topics across your selected indexed documents.",
+                  desc: "Ask targeted questions or compare standard LLM output against RAG-grounded synthesis side by side.",
+                  tone: "text-violet-700 dark:text-violet-300 bg-violet-500/15 border-violet-400/25",
                 },
                 {
-                  icon: "format_quote",
-                  accent: "text-light-secondary dark:text-dark-secondary",
-                  title: "Source Citations",
-                  desc: "Every response links directly to the source PDF filename, page number, chunk ID, and similarity score.",
+                  icon: Quote,
+                  title: "Verifiable Source Citations",
+                  desc: "Interactive citations reference exact filenames, page numbers, chunk IDs, and cosine similarity scores.",
+                  tone: "text-cyan-700 dark:text-cyan-300 bg-cyan-500/15 border-cyan-400/25",
                 },
-                {
-                  icon: "shield",
-                  accent: "text-light-primary dark:text-dark-primary",
-                  title: "Secure Document Management",
-                  desc: "Organize, inspect, and remove indexed documents and their stored vectors from your workspace at any time.",
-                },
-                {
-                  icon: "bolt",
-                  accent: "text-light-secondary dark:text-dark-secondary",
-                  title: "Instant Knowledge Discovery",
-                  desc: "Compare ungrounded LLM responses against RAG-grounded answers side by side to verify accuracy.",
-                },
-              ].map((feat) => (
-                <article
-                  key={feat.title}
-                  className="h-full bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-lg shadow-sm flex flex-col gap-gutter-sm"
-                >
-                  <div className={`w-10 h-10 rounded bg-light-surface-container-low dark:bg-dark-surface-container flex items-center justify-center ${feat.accent}`}>
-                    <span className="material-symbols-outlined text-[22px]" aria-hidden="true">
-                      {feat.icon}
-                    </span>
-                  </div>
-                  <h3 className="font-title text-title-md text-light-on-surface dark:text-dark-on-surface">
-                    {feat.title}
-                  </h3>
-                  <p className="font-body text-body-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                    {feat.desc}
-                  </p>
-                </article>
-              ))}
+              ].map((feat) => {
+                const Icon = feat.icon;
+                return (
+                  <article
+                    key={feat.title}
+                    className="dm-card p-6 flex flex-col gap-4 hover:border-violet-400/35 transition-colors duration-150"
+                  >
+                    <div
+                      className={`w-10 h-10 rounded-xl border flex items-center justify-center ${feat.tone}`}
+                    >
+                      <Icon className="w-5 h-5" />
+                    </div>
+                    <h3 className="font-display text-base font-semibold text-[var(--dm-text)]">
+                      {feat.title}
+                    </h3>
+                    <p className="text-sm text-[var(--dm-text-muted)] leading-relaxed">
+                      {feat.desc}
+                    </p>
+                  </article>
+                );
+              })}
             </div>
           </div>
         </section>
 
-        {/* How It Works Section */}
-        <section id="how-it-works" className="py-section bg-light-surface-container-low/60 dark:bg-dark-surface-container-low/40 border-t border-light-outline-variant/40 dark:border-dark-outline-variant/40">
-          <div className="max-w-7xl mx-auto px-gutter-md sm:px-gutter-lg lg:px-gutter-xl">
-            <div className="max-w-2xl mb-gutter-xl">
-              <h2 className="font-headline text-headline-lg-mobile lg:text-headline-lg text-light-on-surface dark:text-dark-on-surface mb-gutter-sm">
-                How It Works
-              </h2>
-              <p className="font-body text-body-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                Three transparent steps from raw PDF upload to grounded AI answers.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-gutter-lg items-stretch">
-              {[
-                {
-                  step: "01. Upload Documents",
-                  icon: "cloud_upload",
-                  color: "text-light-primary dark:text-dark-primary",
-                  desc: "Add your PDFs. DocuMind extracts text per page, splits content into overlapping semantic chunks, and indexes vector embeddings.",
-                },
-                {
-                  step: "02. Retrieve Relevant Context",
-                  icon: "troubleshoot",
-                  color: "text-light-secondary dark:text-dark-secondary",
-                  desc: "Your question is embedded and matched against your document chunks via cosine similarity search to locate top passages.",
-                },
-                {
-                  step: "03. Get Grounded AI Answers",
-                  icon: "task_alt",
-                  color: "text-light-primary dark:text-dark-primary",
-                  desc: "Receive clear answers synthesized by Gemini from retrieved context with expandable page-level source citations.",
-                },
-              ].map((item) => (
-                <div
-                  key={item.step}
-                  className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-lg flex flex-col gap-gutter-sm"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className={`font-label text-label-md font-semibold ${item.color}`}>
-                      {item.step}
-                    </span>
-                    <span className={`material-symbols-outlined ${item.color} text-[22px]`} aria-hidden="true">
-                      {item.icon}
-                    </span>
-                  </div>
-                  <p className="font-body text-body-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                    {item.desc}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        {/* About / CTA Strip */}
-        <section id="about" className="py-section border-t border-light-outline-variant/40 dark:border-dark-outline-variant/40">
-          <div className="max-w-7xl mx-auto px-gutter-md sm:px-gutter-lg lg:px-gutter-xl">
-            <div className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-lg p-gutter-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-gutter-lg shadow-sm">
-              <div className="max-w-2xl flex flex-col gap-gutter-xs">
-                <h2 className="font-headline text-headline-md text-light-on-surface dark:text-dark-on-surface">
-                  Ready to explore your documents with RAG?
+        {/* Technology Stack Strip */}
+        <section id="technology" className="py-16 border-t border-[var(--dm-border)]">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="dm-card p-6 sm:p-10 flex flex-col lg:flex-row lg:items-center justify-between gap-8">
+              <div className="max-w-xl">
+                <h2 className="font-display text-2xl font-bold text-[var(--dm-text)]">
+                  Transparent End-to-End Architecture
                 </h2>
-                <p className="font-body text-body-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  Open the workspace to inspect the live dashboard, upload PDFs, test document chat, and
-                  compare RAG vs. non-RAG responses.
+                <p className="mt-2.5 text-sm sm:text-base text-[var(--dm-text-muted)] leading-relaxed">
+                  Powered by Node.js, Express, per-page PDF parsing, Gemini Embeddings, persistent
+                  disk vector storage, and grounded Gemini generation. Compare RAG vs. ungrounded
+                  answers live inside the workspace.
                 </p>
+                <div className="mt-6 grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs text-[var(--dm-text-secondary)]">
+                  <div className="flex items-center gap-2">
+                    <Database className="w-4 h-4 text-cyan-700 dark:text-cyan-300 shrink-0" />
+                    <span>Persistent JSON Vector Store</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Binary className="w-4 h-4 text-violet-700 dark:text-violet-300 shrink-0" />
+                    <span>Gemini Embedding Vectors</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Cpu className="w-4 h-4 text-cyan-700 dark:text-cyan-300 shrink-0" />
+                    <span>Cosine Top-K Retrieval</span>
+                  </div>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-gutter-md">
+
+              <div className="flex flex-wrap items-center gap-3 shrink-0">
                 <button
                   type="button"
                   onClick={() => onNavigate("compare")}
-                  className="px-gutter-md py-2.5 rounded border border-light-outline-variant dark:border-dark-outline-variant bg-light-surface-container-lowest dark:bg-dark-surface-container text-light-on-surface dark:text-dark-on-surface font-label text-label-lg hover:bg-light-surface-container-low transition-colors duration-state-change whitespace-nowrap shrink-0"
+                  className="px-5 py-2.5 rounded-xl border border-[var(--dm-border)] bg-[var(--dm-bg-secondary)] hover:bg-slate-900/5 dark:hover:bg-white/5 text-sm font-medium text-[var(--dm-text)] transition-colors whitespace-nowrap"
                 >
-                  See RAG Comparison
+                  Compare RAG vs. Standard
                 </button>
                 <button
                   type="button"
                   onClick={() => onNavigate("dashboard")}
-                  className="px-gutter-lg py-2.5 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container font-label text-label-lg hover:bg-light-primary-container transition-colors duration-state-change shadow-sm whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all whitespace-nowrap"
                 >
-                  Launch Workspace
+                  <span>Open Workspace</span>
+                  <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
@@ -391,30 +536,26 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
         </section>
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-light-outline-variant/50 dark:border-dark-outline-variant/50 bg-light-surface-container-lowest dark:bg-dark-surface-container-lowest py-gutter-xl">
-        <div className="max-w-7xl mx-auto px-gutter-md sm:px-gutter-lg lg:px-gutter-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-gutter-md">
-          <div className="flex items-center gap-gutter-sm">
-            <div className="w-7 h-7 rounded bg-gradient-to-br from-light-primary to-light-secondary flex items-center justify-center text-light-on-primary">
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
-                psychology
-              </span>
-            </div>
-            <span className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface">
-              DocuMind
-            </span>
-            <span className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-              — Your Documents. Your Knowledge. One Intelligent Assistant.
+      {/* Clean Footer */}
+      <footer className="relative z-10 border-t border-[var(--dm-border)] bg-[var(--dm-bg-secondary)]/70 py-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <DocuMindLogo animated={false} />
+            <span className="text-xs text-[var(--dm-text-muted)]">
+              Document Intelligence &amp; Grounded RAG Workspace
             </span>
           </div>
-          <div className="flex items-center gap-gutter-lg font-label text-label-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-            <button type="button" onClick={() => onNavigate("dashboard")} className="hover:text-light-primary dark:hover:text-dark-primary">
-              Dashboard
+          <div className="flex flex-wrap items-center gap-5 text-xs font-medium text-[var(--dm-text-muted)]">
+            <button type="button" onClick={() => onNavigate("dashboard")} className="hover:text-[var(--dm-text)]">
+              Overview
             </button>
-            <button type="button" onClick={() => onNavigate("chat")} className="hover:text-light-primary dark:hover:text-dark-primary">
+            <button type="button" onClick={() => onNavigate("documents")} className="hover:text-[var(--dm-text)]">
+              My Documents
+            </button>
+            <button type="button" onClick={() => onNavigate("chat")} className="hover:text-[var(--dm-text)]">
               AI Chat
             </button>
-            <button type="button" onClick={() => onNavigate("compare")} className="hover:text-light-primary dark:hover:text-dark-primary">
+            <button type="button" onClick={() => onNavigate("compare")} className="hover:text-[var(--dm-text)]">
               RAG Comparison
             </button>
           </div>

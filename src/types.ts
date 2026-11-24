@@ -12,7 +12,7 @@ export type ProcessingStatus =
   | "Extracting Text"
   | "Chunking"
   | "Generating Embeddings"
-  | "Indexing in ChromaDB"
+  | "Indexing Vectors"
   | "Indexed Successfully"
   | "Failed";
 
@@ -61,6 +61,7 @@ export interface DashboardStats {
 
 export interface CompareResponse {
   question: string;
+  model?: string;
   without_rag: {
     answer: string;
   };
@@ -76,6 +77,27 @@ export interface RetrievalInspectResponse {
   chunks: RetrievedChunk[];
   prompt_preview: string;
   answer: string;
+  model?: string;
+  embedding_model?: string;
+  embedding_dimensions?: number | null;
+  total_chunks_indexed?: number;
+  top_k?: number;
+}
+
+export interface HealthStatus {
+  status: string;
+  backend: string;
+  vector_store: string;
+  embedding_model: string;
+  embedding_dimensions: number | null;
+  gemini_model: string;
+  gemini_configured: boolean;
+  documents_count: number;
+  indexed_documents_count: number;
+  chunks_count: number;
+  chunk_size_tokens: number;
+  chunk_overlap_tokens: number;
+  storage_file: string;
 }
 
 export type ThemeMode = "light" | "dark" | "system";

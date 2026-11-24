@@ -4,6 +4,8 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { MotionConfig } from "motion/react";
+import { ToastProvider } from "./components/ToastProvider";
 import { AIDocumentChat } from "./pages/AIDocumentChat";
 import { DocumentUpload } from "./pages/DocumentUpload";
 import { LandingPage } from "./pages/LandingPage";
@@ -13,10 +15,10 @@ import { RetrievalSources } from "./pages/RetrievalSources";
 import { SettingsProfile } from "./pages/SettingsProfile";
 import { RoutePage, UserPreferences } from "./types";
 
-const PREFS_STORAGE_KEY = "documind_preferences_v1";
+const PREFS_STORAGE_KEY = "documind_preferences_v2";
 
 const DEFAULT_PREFS: UserPreferences = {
-  theme: "light",
+  theme: "dark",
   autoIndex: true,
   includeCitations: true,
   topK: 5,
@@ -68,55 +70,63 @@ export default function App() {
     setSelectedDocIds([documentId]);
   }, []);
 
-  if (activePage === "landing") {
-    return <LandingPage onNavigate={setActivePage} />;
-  }
-  if (activePage === "dashboard") {
+  const renderPage = () => {
+    if (activePage === "landing") {
+      return <LandingPage onNavigate={setActivePage} />;
+    }
+    if (activePage === "dashboard") {
+      return (
+        <MainDashboard
+          onNavigate={setActivePage}
+          onSelectDocumentForChat={handleSelectDocForChat}
+          preferences={preferences}
+        />
+      );
+    }
+    if (activePage === "documents") {
+      return (
+        <DocumentUpload
+          onNavigate={setActivePage}
+          onSelectDocumentForChat={handleSelectDocForChat}
+          preferences={preferences}
+        />
+      );
+    }
+    if (activePage === "chat") {
+      return (
+        <AIDocumentChat
+          onNavigate={setActivePage}
+          selectedDocIds={selectedDocIds}
+          onChangeSelectedDocIds={setSelectedDocIds}
+          onInspectQuery={setInspectQuery}
+          preferences={preferences}
+        />
+      );
+    }
+    if (activePage === "retrieval") {
+      return (
+        <RetrievalSources
+          onNavigate={setActivePage}
+          initialQuery={inspectQuery}
+          preferences={preferences}
+        />
+      );
+    }
+    if (activePage === "compare") {
+      return <RAGComparison onNavigate={setActivePage} preferences={preferences} />;
+    }
     return (
-      <MainDashboard
+      <SettingsProfile
         onNavigate={setActivePage}
-        onSelectDocumentForChat={handleSelectDocForChat}
         preferences={preferences}
+        onUpdatePreferences={setPreferences}
       />
     );
-  }
-  if (activePage === "documents") {
-    return (
-      <DocumentUpload
-        onNavigate={setActivePage}
-        onSelectDocumentForChat={handleSelectDocForChat}
-        preferences={preferences}
-      />
-    );
-  }
-  if (activePage === "chat") {
-    return (
-      <AIDocumentChat
-        onNavigate={setActivePage}
-        selectedDocIds={selectedDocIds}
-        onChangeSelectedDocIds={setSelectedDocIds}
-        onInspectQuery={setInspectQuery}
-        preferences={preferences}
-      />
-    );
-  }
-  if (activePage === "retrieval") {
-    return (
-      <RetrievalSources
-        onNavigate={setActivePage}
-        initialQuery={inspectQuery}
-        preferences={preferences}
-      />
-    );
-  }
-  if (activePage === "compare") {
-    return <RAGComparison onNavigate={setActivePage} preferences={preferences} />;
-  }
+  };
+
   return (
-    <SettingsProfile
-      onNavigate={setActivePage}
-      preferences={preferences}
-      onUpdatePreferences={setPreferences}
-    />
+    <MotionConfig reducedMotion="user">
+      <ToastProvider>{renderPage()}</ToastProvider>
+    </MotionConfig>
   );
 }

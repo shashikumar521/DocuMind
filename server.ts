@@ -11,52 +11,13 @@ import {
   getGeminiChatModel,
   isGeminiConfigured,
 } from "./server/geminiClient.ts";
-import { ragEngine } from "./server/ragEngine.ts";
+import {
+  CHUNK_OVERLAP_TOKENS,
+  CHUNK_SIZE_TOKENS,
+  ragEngine,
+} from "./server/ragEngine.ts";
 
 const PORT = 3000;
-const FASTAPI_BACKEND_URL = process.env.FASTAPI_BACKEND_URL?.trim().replace(/\/$/, "");
-const FASTAPI_PROBE_TTL_MS = 5000;
-
-let cachedFastApiProbe: { checkedAt: number; active: boolean; reason: string } | null = null;
-
-async function probeFastApiBackend(): Promise<{ active: boolean; reason: string }> {
-  if (!FASTAPI_BACKEND_URL) {
-    return { active: false, reason: "FASTAPI_BACKEND_URL is not configured." };
-  }
-  const now = Date.now();
-  if (cachedFastApiProbe && now - cachedFastApiProbe.checkedAt < FASTAPI_PROBE_TTL_MS) {
-    return { active: cachedFastApiProbe.active, reason: cachedFastApiProbe.reason };
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1500);
-  try {
-    const res = await fetch(`${FASTAPI_BACKEND_URL}/api/health`, {
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      const reason = `FASTAPI_BACKEND_URL (${FASTAPI_BACKEND_URL}) returned HTTP ${res.status} instead of a python-fastapi health check.`;
-      cachedFastApiProbe = { checkedAt: now, active: false, reason };
-      return { active: false, reason };
-    }
-    const data = (await res.json().catch(() => null)) as { backend?: string } | null;
-    if (data?.backend !== "python-fastapi") {
-      const reason = `Target at ${FASTAPI_BACKEND_URL} did not identify as backend="python-fastapi".`;
-      cachedFastApiProbe = { checkedAt: now, active: false, reason };
-      return { active: false, reason };
-    }
-    const reason = `Connected to python-fastapi at ${FASTAPI_BACKEND_URL}.`;
-    cachedFastApiProbe = { checkedAt: now, active: true, reason };
-    return { active: true, reason };
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "Connection failed.";
-    const reason = `FASTAPI_BACKEND_URL (${FASTAPI_BACKEND_URL}) unreachable: ${msg}`;
-    cachedFastApiProbe = { checkedAt: now, active: false, reason };
-    return { active: false, reason };
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -66,70 +27,29 @@ const upload = multer({
   },
 });
 
-async function readRawBody(req: Request): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
 async function startServer() {
   const app = express();
-
-  // Optional proxy to standalone Python FastAPI + ChromaDB + SentenceTransformers backend
-  // Only proxies when FASTAPI_BACKEND_URL responds as backend="python-fastapi"
-  app.use("/api", async (req: Request, res: Response, next) => {
-    if (!FASTAPI_BACKEND_URL) {
-      next();
-      return;
-    }
-    const probe = await probeFastApiBackend();
-    if (!probe.active) {
-      next();
-      return;
-    }
-    try {
-      const targetUrl = `${FASTAPI_BACKEND_URL}/api${req.url}`;
-      const headers: Record<string, string> = {};
-      if (req.headers["content-type"]) {
-        headers["content-type"] = String(req.headers["content-type"]);
-      }
-      const hasBody = req.method !== "GET" && req.method !== "HEAD";
-      const rawBody = hasBody ? await readRawBody(req) : undefined;
-      const upstream = await fetch(targetUrl, {
-        method: req.method,
-        headers,
-        body: rawBody ? new Uint8Array(rawBody) : undefined,
-      });
-      const arrayBuf = await upstream.arrayBuffer();
-      res.status(upstream.status);
-      res.setHeader("content-type", upstream.headers.get("content-type") || "application/json");
-      res.send(Buffer.from(arrayBuf));
-    } catch (err: unknown) {
-      cachedFastApiProbe = null;
-      const msg = err instanceof Error ? err.message : "FastAPI backend unreachable.";
-      res.status(502).json({ detail: `FastAPI proxy error: ${msg}` });
-    }
-  });
 
   app.use(express.json({ limit: "4mb" }));
 
   // Health check
-  app.get("/api/health", async (_req, res) => {
-    const probe = await probeFastApiBackend();
+  app.get("/api/health", (_req, res) => {
+    const docs = ragEngine.listDocuments();
+    const indexedDocs = docs.filter((d) => d.status === "Indexed Successfully");
     res.json({
       status: "ok",
       backend: "node-express-rag",
       vector_store: "json-disk-vector-store",
       embedding_model: GEMINI_EMBEDDING_MODEL,
+      embedding_dimensions: ragEngine.getEmbeddingDimensions(),
       gemini_model: getGeminiChatModel(),
-      env_gemini_model: process.env.GEMINI_MODEL?.trim() || null,
       gemini_configured: isGeminiConfigured(),
+      documents_count: docs.length,
+      indexed_documents_count: indexedDocs.length,
       chunks_count: ragEngine.getTotalChunksCount(),
-      fastapi_proxy_configured: Boolean(FASTAPI_BACKEND_URL),
-      fastapi_proxy_active: probe.active,
-      fastapi_proxy_note: probe.reason,
+      chunk_size_tokens: CHUNK_SIZE_TOKENS,
+      chunk_overlap_tokens: CHUNK_OVERLAP_TOKENS,
+      storage_file: "data/documind_store.json",
     });
   });
 
@@ -260,12 +180,11 @@ async function startServer() {
 
       try {
         const chunks = await ragEngine.retrieveChunks(question, topK, documentIds);
-        const [withoutRag, withRagResult] = await Promise.all([
-          generateWithoutRagAnswer(question),
-          generateRagAnswer(question, chunks),
-        ]);
+        const withoutRag = await generateWithoutRagAnswer(question);
+        const withRagResult = await generateRagAnswer(question, chunks);
         res.json({
           question,
+          model: getGeminiChatModel(),
           without_rag: {
             answer: withoutRag,
           },
@@ -308,6 +227,11 @@ async function startServer() {
           chunks,
           prompt_preview: promptPreview,
           answer,
+          model: getGeminiChatModel(),
+          embedding_model: GEMINI_EMBEDDING_MODEL,
+          embedding_dimensions: ragEngine.getEmbeddingDimensions(),
+          total_chunks_indexed: ragEngine.getTotalChunksCount(),
+          top_k: topK,
         });
       } catch (err: unknown) {
         const formatted = formatGeminiError(err);

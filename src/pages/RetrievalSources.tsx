@@ -1,13 +1,47 @@
 import React, { useEffect, useState } from "react";
-import { inspectRetrievalPipeline } from "../api";
+import {
+  AlertCircle,
+  Binary,
+  Cpu,
+  Database,
+  FileText,
+  Layers,
+  Loader2,
+  MessageSquareText,
+  Search,
+} from "lucide-react";
+import { fetchHealth, inspectRetrievalPipeline } from "../api";
 import { AppShell } from "../components/AppShell";
-import { RetrievalInspectResponse, RoutePage, UserPreferences } from "../types";
+import { MarkdownRenderer } from "../components/MarkdownRenderer";
+import { useToast } from "../components/ToastProvider";
+import {
+  HealthStatus,
+  RetrievalInspectResponse,
+  RoutePage,
+  UserPreferences,
+} from "../types";
 
 interface RetrievalSourcesProps {
   onNavigate: (page: RoutePage) => void;
   initialQuery?: string;
   preferences: UserPreferences;
 }
+
+const PIPELINE_STEPS: {
+  id: string;
+  num: string;
+  title: string;
+  sub: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
+  { id: "ingest", num: "01", title: "PDF Ingestion", sub: "Validated binary", icon: FileText },
+  { id: "extract", num: "02", title: "Text Extraction", sub: "Per-page parsing", icon: Layers },
+  { id: "chunk", num: "03", title: "Chunking", sub: "Overlap window", icon: Cpu },
+  { id: "embed", num: "04", title: "Embedding Gen", sub: "Dense vectors", icon: Binary },
+  { id: "store", num: "05", title: "Vector Storage", sub: "Disk JSON store", icon: Database },
+  { id: "retrieve", num: "06", title: "Similarity Search", sub: "Cosine Top-K", icon: Search },
+  { id: "generate", num: "07", title: "Gemini Response", sub: "Cited synthesis", icon: MessageSquareText },
+];
 
 export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
   onNavigate,
@@ -18,6 +52,18 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RetrievalInspectResponse | null>(null);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const { pushToast } = useToast();
+
+  const loadHealth = () => {
+    fetchHealth()
+      .then(setHealth)
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    loadHealth();
+  }, []);
 
   const runInspect = async (qText: string) => {
     const trimmed = qText.trim();
@@ -30,8 +76,11 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
         topK: preferences.topK,
       });
       setResult(data);
+      loadHealth();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to inspect retrieval pipeline.");
+      const msg = err instanceof Error ? err.message : "Failed to inspect retrieval pipeline.";
+      setError(msg);
+      pushToast({ kind: "error", title: "Inspection failed", description: msg });
     } finally {
       setLoading(false);
     }
@@ -45,154 +94,248 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialQuery]);
 
+  const embeddingDims = result?.embedding_dimensions ?? health?.embedding_dimensions ?? null;
+  const totalChunks = result?.total_chunks_indexed ?? health?.chunks_count ?? 0;
+
   return (
     <AppShell
       activePage="retrieval"
       onNavigate={onNavigate}
-      title="Retrieval & Source References"
-      subtitle="Inspect the end-to-end RAG pipeline from query embedding to top retrieved chunks."
+      title="Pipeline Inspector"
+      subtitle="Inspect live chunk counts, embedding dimensions, similarity scores, and the exact prompt sent to Gemini."
       preferences={preferences}
     >
-      <main className="flex-1 p-gutter-md lg:p-gutter-lg max-w-7xl w-full mx-auto flex flex-col gap-gutter-lg">
+      <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto flex flex-col gap-6">
         {/* Query Bar */}
-        <section className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-lg shadow-sm flex flex-col gap-gutter-sm">
+        <section className="dm-card p-5 sm:p-6 flex flex-col gap-3">
           <form
             onSubmit={(e) => {
               e.preventDefault();
               runInspect(query);
             }}
-            className="flex flex-col sm:flex-row items-stretch sm:items-center gap-gutter-sm"
+            className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3"
           >
             <input
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Enter a question to inspect query embedding, vector search scores, and Gemini prompt..."
-              className="flex-1 px-gutter-md py-2.5 rounded bg-light-surface-container-low dark:bg-dark-surface-container border border-light-outline-variant dark:border-dark-outline-variant text-light-on-surface dark:text-dark-on-surface placeholder:text-light-outline dark:placeholder:text-dark-outline font-body text-body-md focus:border-light-primary focus:ring-2 focus:ring-light-primary/20 focus:outline-none"
+              placeholder="Enter a query to trace embedding retrieval, similarity scores, and Gemini prompt payload..."
+              className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none"
             />
             <button
               type="submit"
               disabled={loading || !query.trim()}
-              className="inline-flex items-center justify-center gap-gutter-sm px-gutter-lg py-2.5 rounded bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container font-label text-label-lg hover:bg-light-primary-container transition-colors duration-state-change shadow-sm shrink-0 disabled:opacity-50 whitespace-nowrap"
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all disabled:opacity-45 shrink-0 whitespace-nowrap"
             >
-              <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                manage_search
-              </span>
+              {loading ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Search className="w-4 h-4" />
+              )}
               <span>{loading ? "Inspecting..." : "Inspect Pipeline"}</span>
             </button>
           </form>
+
           {error && (
             <div
               role="alert"
-              className="p-gutter-sm rounded bg-light-error-container dark:bg-dark-error-container text-light-on-error-container dark:text-dark-on-error-container flex items-center gap-gutter-sm"
+              className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300 flex items-center gap-2.5 text-xs sm:text-sm"
             >
-              <span className="material-symbols-outlined text-[18px] shrink-0" aria-hidden="true">
-                error
-              </span>
-              <span className="font-body text-body-sm">{error}</span>
+              <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <span>{error}</span>
             </div>
           )}
         </section>
 
-        {/* Pipeline Flow Stepper */}
-        <section
-          aria-label="RAG Pipeline Stages"
-          className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-lg shadow-sm"
-        >
-          <div className="flex items-center justify-between mb-gutter-md flex-wrap gap-gutter-sm">
-            <h2 className="font-headline text-headline-sm text-light-on-surface dark:text-dark-on-surface">
-              RAG Retrieval Pipeline
+        {/* Animated 7-Step Connected Pipeline Visualizer */}
+        <section aria-label="RAG Architecture Stages" className="dm-card p-5 sm:p-6 relative overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-5">
+            <h2 className="font-display text-base font-semibold text-[var(--dm-text)]">
+              End-to-End RAG Execution Stages
             </h2>
-            <span className="font-mono text-mono-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-              Vector Embeddings + Cosine Similarity + Gemini
+            <span className="font-mono text-xs text-cyan-700 dark:text-cyan-300">
+              {result ? "Live trace completed" : "Ready for inspection"}
             </span>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-gutter-sm">
-            {[
-              { step: "1. User Question", sub: "Raw query text", color: "text-light-primary dark:text-dark-primary" },
-              { step: "2. Query Embedding", sub: "Dense vector", color: "text-light-secondary dark:text-dark-secondary" },
-              { step: "3. Semantic Search", sub: "Cosine similarity", color: "text-light-primary dark:text-dark-primary" },
-              { step: `4. Top ${preferences.topK} Chunks`, sub: "Ranked passages", color: "text-light-secondary dark:text-dark-secondary" },
-              { step: "5. Context to Gemini", sub: "Grounded prompt", color: "text-light-primary dark:text-dark-primary" },
-              { step: "6. Generated Answer", sub: "Cited synthesis", color: "text-light-primary dark:text-dark-primary" },
-            ].map((stage) => (
-              <div
-                key={stage.step}
-                className={`p-gutter-sm rounded bg-light-surface-container-low dark:bg-dark-surface-container border ${
-                  result
-                    ? "border-light-primary/50 dark:border-dark-primary/50"
-                    : "border-light-outline-variant/60 dark:border-dark-outline-variant/60"
-                } flex flex-col gap-gutter-xs`}
-              >
-                <span className={`font-label text-label-sm ${stage.color}`}>{stage.step}</span>
-                <span className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  {stage.sub}
-                </span>
-              </div>
-            ))}
+
+          <div className="relative">
+            <svg
+              aria-hidden="true"
+              className="hidden xl:block absolute top-8 left-8 right-8 w-[calc(100%-4rem)] h-4 pointer-events-none z-0"
+              preserveAspectRatio="none"
+              viewBox="0 0 1000 16"
+            >
+              <line
+                x1="0"
+                y1="8"
+                x2="1000"
+                y2="8"
+                stroke="rgba(148,163,184,0.2)"
+                strokeWidth="2"
+              />
+              <line
+                x1="0"
+                y1="8"
+                x2="1000"
+                y2="8"
+                stroke="#22D3EE"
+                strokeWidth="2"
+                className={result || loading ? "animate-dm-flow" : ""}
+                opacity={result || loading ? 0.85 : 0.3}
+              />
+            </svg>
+
+            <div className="relative z-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2.5">
+              {PIPELINE_STEPS.map((stage) => {
+                const Icon = stage.icon;
+                const active = Boolean(result) || loading;
+                return (
+                  <div
+                    key={stage.id}
+                    className={`p-3.5 rounded-2xl border transition-all flex flex-col gap-2 ${
+                      result
+                        ? "bg-[var(--dm-surface-elevated)] border-cyan-400/40"
+                        : "bg-[var(--dm-bg-secondary)]/80 border-[var(--dm-border)]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span
+                        className={`w-8 h-8 rounded-xl border flex items-center justify-center ${
+                          active
+                            ? "bg-violet-500/15 border-violet-400/35 text-cyan-700 dark:text-cyan-300"
+                            : "bg-slate-900/5 dark:bg-white/5 border-[var(--dm-border)] text-[var(--dm-text-muted)]"
+                        }`}
+                      >
+                        <Icon className="w-4 h-4" />
+                      </span>
+                      <span className="font-mono text-[11px] text-[var(--dm-text-muted)] tabular-nums">
+                        {stage.num}
+                      </span>
+                    </div>
+                    <div>
+                      <p className="font-display text-xs font-semibold text-[var(--dm-text)]">
+                        {stage.title}
+                      </p>
+                      <p className="text-[11px] text-[var(--dm-text-muted)] mt-0.5">
+                        {stage.sub}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Real Backend Technical Metadata */}
+          <div className="mt-5 pt-5 border-t border-[var(--dm-border)] grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-xs">
+            <div>
+              <span className="text-[var(--dm-text-muted)] block">Indexed Chunks</span>
+              <span className="font-mono font-semibold text-[var(--dm-text)] tabular-nums">
+                {totalChunks.toLocaleString()}
+              </span>
+            </div>
+            <div>
+              <span className="text-[var(--dm-text-muted)] block">Embedding Dim</span>
+              <span className="font-mono font-semibold text-cyan-700 dark:text-cyan-300 tabular-nums">
+                {embeddingDims ? `${embeddingDims}d` : "— (no chunks)"}
+              </span>
+            </div>
+            <div>
+              <span className="text-[var(--dm-text-muted)] block">Chunk Window</span>
+              <span className="font-mono font-semibold text-[var(--dm-text)] tabular-nums">
+                {health?.chunk_size_tokens ?? 500} / {health?.chunk_overlap_tokens ?? 100} overlap
+              </span>
+            </div>
+            <div>
+              <span className="text-[var(--dm-text-muted)] block">Embedding Model</span>
+              <span className="font-mono font-semibold text-[var(--dm-text)]">
+                {result?.embedding_model || health?.embedding_model || "gemini-embedding-2"}
+              </span>
+            </div>
+            <div>
+              <span className="text-[var(--dm-text-muted)] block">Generation Model</span>
+              <span className="font-mono font-semibold text-violet-700 dark:text-violet-300">
+                {result?.model || health?.gemini_model || "gemini-4-hydrogen"}
+              </span>
+            </div>
+            <div>
+              <span className="text-[var(--dm-text-muted)] block">Vector Storage</span>
+              <span className="font-mono font-semibold text-[var(--dm-text)] truncate block">
+                {health?.storage_file || "data/documind_store.json"}
+              </span>
+            </div>
           </div>
         </section>
 
-        {/* Two-Column Distinction: Retrieved Context (Left) vs. Context Sent to Gemini & Generated Answer (Right) */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-gutter-lg items-start">
-          {/* Top Retrieved Chunks */}
-          <section className="lg:col-span-7 flex flex-col gap-gutter-md">
+        {/* Two-Column Results: Retrieved Chunks & Prompt + Gemini Output */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* Retrieved Chunks */}
+          <section className="lg:col-span-7 flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="font-headline text-headline-sm text-light-on-surface dark:text-dark-on-surface">
-                  Top {preferences.topK} Retrieved Chunks
+                <h2 className="font-display text-lg font-semibold text-[var(--dm-text)]">
+                  Top {result?.top_k ?? preferences.topK} Retrieved Chunks
                 </h2>
-                <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  Ranked passages returned by vector similarity search.
+                <p className="text-xs text-[var(--dm-text-muted)]">
+                  Ranked by exact cosine similarity against stored chunk vectors.
                 </p>
               </div>
-              <span className="font-label text-label-sm text-light-on-surface-variant dark:text-dark-on-surface-variant tabular-nums">
+              <span className="font-mono text-xs text-cyan-700 dark:text-cyan-300 tabular-nums">
                 {result ? `${result.chunks.length} matched` : "Awaiting query"}
               </span>
             </div>
 
-            {!result ? (
-              <div className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-xl text-center">
-                <p className="font-body text-body-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  Run a query above to inspect the exact retrieved document chunks, page numbers, chunk
-                  IDs, and cosine similarity scores.
-                </p>
+            {loading ? (
+              <div className="space-y-3">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="h-32 rounded-2xl bg-slate-900/5 dark:bg-white/5 animate-pulse" />
+                ))}
+              </div>
+            ) : !result ? (
+              <div className="dm-card p-8 text-center text-sm text-[var(--dm-text-muted)]">
+                Run a query above to inspect the ranked chunks, page numbers, chunk IDs, cosine
+                distances, and similarity scores returned by the backend.
               </div>
             ) : result.chunks.length === 0 ? (
-              <div className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-xl text-center">
-                <p className="font-body text-body-md text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  No indexed chunks matched your query. Upload and index PDF documents first.
-                </p>
+              <div className="dm-card p-8 text-center text-sm text-[var(--dm-text-muted)]">
+                No indexed chunks matched your query. Upload and index a PDF document first.
               </div>
             ) : (
-              <div className="flex flex-col gap-gutter-sm">
+              <div className="space-y-3">
                 {result.chunks.map((chunk) => (
                   <article
                     key={chunk.chunk_id}
-                    className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-md shadow-sm flex flex-col gap-gutter-xs"
+                    className="dm-card p-4 sm:p-5 flex flex-col gap-3 hover:border-violet-400/35 transition-colors"
                   >
-                    <div className="flex flex-wrap items-center justify-between gap-gutter-sm">
-                      <div className="flex items-center gap-gutter-sm min-w-0">
-                        <span className="px-2 py-0.5 rounded bg-light-surface-container dark:bg-dark-surface-container text-light-primary dark:text-dark-primary font-mono text-mono-sm tabular-nums">
-                          Rank #{chunk.rank}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono font-semibold text-violet-700 dark:text-violet-300 tabular-nums">
+                          #{chunk.rank}
                         </span>
-                        <span className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface truncate">
+                        <span className="font-display font-semibold text-[var(--dm-text)] truncate">
                           {chunk.filename}
                         </span>
                       </div>
-                      <div className="flex items-center gap-gutter-sm font-mono text-mono-sm tabular-nums">
-                        <span className="text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                          Page {chunk.page_number}
-                        </span>
-                        <span className="text-light-secondary dark:text-dark-secondary">
-                          Similarity: {(chunk.similarity * 100).toFixed(1)}%
+                      <div className="flex items-center gap-3 font-mono text-[11px] tabular-nums">
+                        <span className="text-[var(--dm-text-muted)]">Page {chunk.page_number}</span>
+                        <span className="text-cyan-700 dark:text-cyan-300">
+                          Sim: {(chunk.similarity * 100).toFixed(1)}%
                         </span>
                       </div>
                     </div>
-                    <p className="font-mono text-mono-sm text-light-outline dark:text-dark-outline truncate">
-                      Chunk ID: {chunk.chunk_id} · Distance: {chunk.distance}
+
+                    {/* Visual similarity meter */}
+                    <div className="w-full h-1.5 rounded-full bg-slate-900/10 dark:bg-white/5 overflow-hidden">
+                      <div
+                        className="h-1.5 rounded-full bg-gradient-to-r from-violet-500 to-cyan-400"
+                        style={{ width: `${Math.max(4, Math.min(100, chunk.similarity * 100))}%` }}
+                      />
+                    </div>
+
+                    <p className="font-mono text-[11px] text-[var(--dm-text-muted)] truncate">
+                      ID: {chunk.chunk_id} · Cosine Distance: {chunk.distance}
                     </p>
-                    <p className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant bg-light-surface-container-low/60 dark:bg-dark-surface-container/60 p-gutter-sm rounded border border-light-outline-variant/40 dark:border-dark-outline-variant/40">
+                    <p className="text-xs sm:text-sm text-[var(--dm-text-secondary)] bg-[var(--dm-bg-secondary)]/80 border border-[var(--dm-border)] rounded-xl p-3 leading-relaxed">
                       {chunk.text}
                     </p>
                   </article>
@@ -201,46 +344,44 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
             )}
           </section>
 
-          {/* Context Sent to Gemini & Final AI-Generated Response */}
-          <section className="lg:col-span-5 flex flex-col gap-gutter-md">
-            <div className="bg-light-surface-container-low dark:bg-dark-surface-container-low border border-light-outline-variant/60 dark:border-dark-outline-variant/60 rounded-md p-gutter-lg flex flex-col gap-gutter-sm">
-              <div className="flex items-center justify-between">
-                <h2 className="font-title text-title-md text-light-on-surface dark:text-dark-on-surface">
+          {/* Prompt Payload & Gemini Synthesis */}
+          <section className="lg:col-span-5 flex flex-col gap-4">
+            <div className="dm-card p-5 flex flex-col gap-3">
+              <div className="flex items-center justify-between text-xs">
+                <h2 className="font-display text-sm font-semibold text-[var(--dm-text)]">
                   Context Sent to Gemini
                 </h2>
-                <span className="font-mono text-mono-sm text-light-on-surface-variant dark:text-dark-on-surface-variant">
-                  Prompt Payload
-                </span>
+                <span className="font-mono text-[var(--dm-text-muted)]">Prompt Payload</span>
               </div>
-              <pre className="font-mono text-mono-sm text-light-on-surface-variant dark:text-dark-on-surface-variant bg-light-surface-container-lowest dark:bg-dark-surface-container p-gutter-md rounded border border-light-outline-variant/50 dark:border-dark-outline-variant/50 overflow-x-auto whitespace-pre-wrap max-h-80 overflow-y-auto">
+              <pre className="font-mono text-[11px] text-[var(--dm-text-secondary)] bg-[var(--dm-bg)] border border-[var(--dm-border)] p-3.5 rounded-xl overflow-x-auto whitespace-pre-wrap max-h-72 overflow-y-auto leading-relaxed">
                 {result
                   ? result.prompt_preview
-                  : "System: Answer strictly using ONLY the retrieved document passages. Cite document filename and page number.\n\n<retrieved_context>\n[Top retrieved chunks will appear here]\n</retrieved_context>"}
+                  : "<retrieved_context>\n  Run a pipeline inspection query above to inspect the exact grounded prompt sent to Gemini.\n</retrieved_context>"}
               </pre>
             </div>
 
-            <div className="bg-light-surface-container-lowest dark:bg-dark-surface-container-low border border-light-secondary/50 dark:border-dark-secondary/50 rounded-md p-gutter-lg shadow-sm flex flex-col gap-gutter-sm">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-gutter-xs">
-                  <span
-                    className="material-symbols-outlined text-light-secondary dark:text-dark-secondary text-[20px]"
-                    aria-hidden="true"
-                  >
-                    auto_awesome
-                  </span>
-                  <h2 className="font-title text-title-md text-light-on-surface dark:text-dark-on-surface">
-                    Generated Answer
-                  </h2>
-                </div>
-                <span className="font-label text-label-sm text-light-secondary dark:text-dark-secondary">
-                  Gemini Output
+            <div className="dm-card dm-glow-border p-5 flex flex-col gap-3">
+              <div className="flex items-center justify-between text-xs">
+                <h2 className="font-display text-sm font-semibold text-[var(--dm-text)]">
+                  Generated Answer
+                </h2>
+                <span className="font-mono text-cyan-700 dark:text-cyan-300">
+                  {result?.model || health?.gemini_model || "gemini-4-hydrogen"}
                 </span>
               </div>
-              <p className="font-body text-body-md text-light-on-surface dark:text-dark-on-surface whitespace-pre-wrap">
-                {result
-                  ? result.answer
-                  : "Run a retrieval inspection query to see the grounded response synthesized by Gemini exclusively from the retrieved chunks."}
-              </p>
+              {loading ? (
+                <div className="space-y-2">
+                  <div className="h-4 w-5/6 rounded bg-slate-900/5 dark:bg-white/5 animate-pulse" />
+                  <div className="h-4 w-full rounded bg-slate-900/5 dark:bg-white/5 animate-pulse" />
+                </div>
+              ) : result ? (
+                <MarkdownRenderer content={result.answer} sources={result.chunks} />
+              ) : (
+                <p className="text-sm text-[var(--dm-text-muted)] leading-relaxed">
+                  Gemini&apos;s citation-backed response synthesized strictly from the retrieved
+                  passages will appear here.
+                </p>
+              )}
             </div>
           </section>
         </div>

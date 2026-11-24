@@ -79,7 +79,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
       if (!isTransient || attempt === maxAttempts) {
         break;
       }
-      await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt - 1)));
+      await new Promise((r) => setTimeout(r, 800 * Math.pow(2, attempt - 1)));
     }
   }
   throw lastErr;
@@ -93,13 +93,25 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
   if (raw.includes("API_KEY_INVALID") || raw.includes("PERMISSION_DENIED")) {
     return {
       status: 403,
-      message: "Gemini API key was rejected. Please verify your GEMINI_API_KEY in Settings > Secrets.",
+      message: "Gemini API key was rejected. Please verify your GEMINI_API_KEY in AI Studio Secrets.",
+    };
+  }
+  if (raw.includes("NOT_FOUND") || raw.includes("no longer available")) {
+    return {
+      status: 400,
+      message: `Configured Gemini model (${getGeminiChatModel()}) is unavailable. Check GEMINI_MODEL configuration.`,
     };
   }
   if (raw.includes("RESOURCE_EXHAUSTED") || raw.includes("429")) {
     return {
       status: 429,
-      message: "Gemini API rate limit reached. Please wait a moment and try again.",
+      message: "Gemini API rate limit reached. Please wait a few seconds and try again.",
+    };
+  }
+  if (raw.includes("UNAVAILABLE") || raw.includes("503") || raw.includes("high demand")) {
+    return {
+      status: 503,
+      message: "Gemini AI service is temporarily busy. Please try again in a few seconds.",
     };
   }
   return {
@@ -112,26 +124,26 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
   const ai = getGeminiClient();
   const vectors: number[][] = [];
-  const batchSize = 16;
+  const concurrency = 3;
 
-  for (let i = 0; i < texts.length; i += batchSize) {
-    const batch = texts.slice(i, i + batchSize);
-    const result = await withRetry(() =>
-      ai.models.embedContent({
-        model: GEMINI_EMBEDDING_MODEL,
-        contents: batch,
+  for (let i = 0; i < texts.length; i += concurrency) {
+    const batch = texts.slice(i, i + concurrency);
+    const batchVectors = await Promise.all(
+      batch.map(async (text) => {
+        const result = await withRetry(() =>
+          ai.models.embedContent({
+            model: GEMINI_EMBEDDING_MODEL,
+            contents: text,
+          })
+        );
+        const emb = result.embeddings?.[0];
+        if (!emb?.values || emb.values.length === 0) {
+          throw new Error("Empty embedding vector returned by Gemini Embedding API.");
+        }
+        return emb.values;
       })
     );
-    const embeddings = result.embeddings ?? [];
-    if (embeddings.length !== batch.length) {
-      throw new Error("Embedding response count mismatch from Gemini Embedding API.");
-    }
-    for (const emb of embeddings) {
-      if (!emb.values || emb.values.length === 0) {
-        throw new Error("Empty embedding vector returned by Gemini Embedding API.");
-      }
-      vectors.push(emb.values);
-    }
+    vectors.push(...batchVectors);
   }
   return vectors;
 }

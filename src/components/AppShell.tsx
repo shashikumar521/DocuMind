@@ -1,5 +1,20 @@
 import React, { useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import {
+  Files,
+  GitCompareArrows,
+  HelpCircle,
+  LayoutDashboard,
+  Menu,
+  MessageSquareText,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+  Workflow,
+  X,
+} from "lucide-react";
 import { RoutePage, UserPreferences } from "../types";
+import { DocuMindLogo } from "./DocuMindLogo";
 import avatarImg from "../assets/images/avatar_maya_lin_1795494013984.jpg";
 
 interface AppShellProps {
@@ -12,13 +27,17 @@ interface AppShellProps {
   children: React.ReactNode;
 }
 
-const NAV_ITEMS: { id: RoutePage; label: string; icon: string }[] = [
-  { id: "dashboard", label: "Dashboard", icon: "dashboard" },
-  { id: "documents", label: "My Documents", icon: "folder_open" },
-  { id: "chat", label: "AI Chat", icon: "chat" },
-  { id: "retrieval", label: "Search & Retrieval", icon: "manage_search" },
-  { id: "compare", label: "RAG Comparison", icon: "compare" },
-  { id: "settings", label: "Settings", icon: "settings" },
+const NAV_ITEMS: {
+  id: RoutePage;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
+  { id: "dashboard", label: "Overview", icon: LayoutDashboard },
+  { id: "documents", label: "My Documents", icon: Files },
+  { id: "chat", label: "AI Chat", icon: MessageSquareText },
+  { id: "compare", label: "RAG Comparison", icon: GitCompareArrows },
+  { id: "retrieval", label: "Pipeline Inspector", icon: Workflow },
+  { id: "settings", label: "Settings", icon: Settings },
 ];
 
 export const AvatarBadge: React.FC<{ size?: "sm" | "md" | "lg"; name: string }> = ({
@@ -27,10 +46,11 @@ export const AvatarBadge: React.FC<{ size?: "sm" | "md" | "lg"; name: string }> 
 }) => {
   const [imgFailed, setImgFailed] = useState(false);
   const dim = size === "sm" ? "w-8 h-8" : size === "lg" ? "w-16 h-16" : "w-9 h-9";
+
   if (imgFailed) {
     return (
       <div
-        className={`${dim} rounded-full bg-light-primary/15 dark:bg-dark-primary/20 text-light-primary dark:text-dark-primary flex items-center justify-center font-title text-title-sm shrink-0 border border-light-outline-variant/60 dark:border-dark-outline-variant/60`}
+        className={`${dim} rounded-full bg-violet-500/20 text-violet-700 dark:text-violet-300 flex items-center justify-center font-display text-xs font-semibold shrink-0 border border-violet-400/30`}
         aria-label={name}
       >
         {name
@@ -42,12 +62,14 @@ export const AvatarBadge: React.FC<{ size?: "sm" | "md" | "lg"; name: string }> 
       </div>
     );
   }
+
   return (
     <img
       src={avatarImg}
       alt={name}
+      referrerPolicy="no-referrer"
       onError={() => setImgFailed(true)}
-      className={`${dim} rounded-full object-cover shrink-0 border border-light-outline-variant/60 dark:border-dark-outline-variant/60`}
+      className={`${dim} rounded-full object-cover shrink-0 border border-[var(--dm-border)]`}
     />
   );
 };
@@ -70,63 +92,77 @@ export const AppShell: React.FC<AppShellProps> = ({
   };
 
   return (
-    <div className="min-h-screen flex bg-light-surface dark:bg-dark-surface text-light-on-surface dark:text-dark-on-surface">
-      {mobileOpen && (
-        <div
-          onClick={() => setMobileOpen(false)}
-          className="fixed inset-0 z-40 bg-light-scrim/40 lg:hidden"
-          aria-hidden="true"
-        />
-      )}
+    <div className="min-h-screen flex bg-[var(--dm-bg)] text-[var(--dm-text)] relative overflow-x-hidden">
+      {/* Subtle ambient background glow */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 overflow-hidden z-0"
+      >
+        <div className="absolute -top-40 -left-32 w-[480px] h-[480px] rounded-full bg-violet-600/10 blur-[120px]" />
+        <div className="absolute top-1/3 -right-40 w-[420px] h-[420px] rounded-full bg-cyan-500/8 blur-[120px]" />
+      </div>
+
+      {/* Mobile backdrop */}
+      <AnimatePresence>
+        {mobileOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            onClick={() => setMobileOpen(false)}
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+            aria-hidden="true"
+          />
+        )}
+      </AnimatePresence>
 
       {/* Collapsible Left Sidebar */}
       <aside
-        className={`fixed lg:static inset-y-0 left-0 z-50 ${
-          collapsed ? "w-20" : "w-64"
-        } min-h-screen bg-light-surface-container-low dark:bg-dark-surface-container-low border-r border-light-outline-variant/60 dark:border-dark-outline-variant/60 flex flex-col justify-between transition-transform duration-surface-enter ${
+        className={`fixed lg:sticky top-0 inset-y-0 left-0 z-50 h-screen ${
+          collapsed ? "w-[76px]" : "w-64"
+        } bg-[var(--dm-bg-secondary)]/95 backdrop-blur-xl border-r border-[var(--dm-border)] flex flex-col justify-between transition-[width,transform] duration-200 ease-out ${
           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         } shrink-0`}
       >
-        <div className="flex flex-col">
+        <div className="flex flex-col min-h-0">
           {/* Brand Header */}
-          <div className="h-16 px-gutter-md flex items-center justify-between border-b border-light-outline-variant/50 dark:border-dark-outline-variant/50">
+          <div className="h-16 px-4 flex items-center justify-between border-b border-[var(--dm-border)]">
             <button
               type="button"
               onClick={() => handleNav("landing")}
-              className="flex items-center gap-gutter-sm overflow-hidden text-left focus-visible:outline-2 focus-visible:outline-light-primary rounded"
+              aria-label="Return to DocuMind home"
+              className="flex items-center overflow-hidden text-left focus-visible:outline-2 focus-visible:outline-violet-400 rounded-lg"
             >
-              <div className="w-8 h-8 rounded-md bg-gradient-to-br from-light-primary to-light-secondary flex items-center justify-center text-light-on-primary shrink-0 shadow-sm">
-                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                  psychology
-                </span>
-              </div>
-              {!collapsed && (
-                <span className="font-headline text-title-md text-light-on-surface dark:text-dark-on-surface whitespace-nowrap">
-                  DocuMind
-                </span>
-              )}
+              <DocuMindLogo compact={collapsed} animated={false} />
             </button>
             <button
               type="button"
               onClick={() => setCollapsed((prev) => !prev)}
               aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              className="hidden lg:inline-flex items-center justify-center w-8 h-8 rounded text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container dark:hover:bg-dark-surface-container transition-colors duration-state-change"
+              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className="hidden lg:inline-flex items-center justify-center w-8 h-8 rounded-lg text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/5 transition-colors"
             >
-              <span className="material-symbols-outlined text-[18px]">dock_to_left</span>
+              {collapsed ? (
+                <PanelLeftOpen className="w-4 h-4" />
+              ) : (
+                <PanelLeftClose className="w-4 h-4" />
+              )}
             </button>
             <button
               type="button"
               onClick={() => setMobileOpen(false)}
-              aria-label="Close sidebar"
-              className="lg:hidden inline-flex items-center justify-center w-8 h-8 rounded text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container dark:hover:bg-dark-surface-container"
+              aria-label="Close navigation menu"
+              className="lg:hidden inline-flex items-center justify-center w-9 h-9 rounded-lg text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/5"
             >
-              <span className="material-symbols-outlined text-[20px]">close</span>
+              <X className="w-5 h-5" />
             </button>
           </div>
 
           {/* Primary Navigation */}
-          <nav aria-label="Sidebar Navigation" className="p-gutter-sm flex flex-col gap-gutter-xs">
+          <nav aria-label="Workspace Navigation" className="p-3 flex flex-col gap-1 overflow-y-auto">
             {NAV_ITEMS.map((item) => {
+              const Icon = item.icon;
               const isActive = activePage === item.id;
               return (
                 <button
@@ -135,52 +171,66 @@ export const AppShell: React.FC<AppShellProps> = ({
                   onClick={() => handleNav(item.id)}
                   aria-current={isActive ? "page" : undefined}
                   title={collapsed ? item.label : undefined}
-                  className={`flex items-center ${
-                    collapsed ? "justify-center" : ""
-                  } gap-gutter-sm px-3 py-2.5 rounded font-label text-label-lg transition-colors duration-state-change text-left whitespace-nowrap ${
+                  className={`relative flex items-center ${
+                    collapsed ? "justify-center px-2" : "px-3.5"
+                  } py-2.5 rounded-xl text-sm font-medium transition-colors text-left whitespace-nowrap ${
                     isActive
-                      ? "bg-light-primary dark:bg-dark-primary-container text-light-on-primary dark:text-dark-on-primary-container shadow-sm"
-                      : "text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container dark:hover:bg-dark-surface-container hover:text-light-on-surface dark:hover:text-dark-on-surface"
+                      ? "text-[var(--dm-text)]"
+                      : "text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/[0.04]"
                   }`}
                 >
-                  <span className="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">
-                    {item.icon}
-                  </span>
-                  {!collapsed && <span>{item.label}</span>}
+                  {isActive && (
+                    <motion.span
+                      layoutId="dm-sidebar-active"
+                      transition={{ type: "spring", stiffness: 380, damping: 32 }}
+                      className="absolute inset-0 rounded-xl bg-gradient-to-r from-violet-500/20 to-cyan-500/15 border border-violet-400/35 shadow-[0_0_24px_-8px_rgba(139,92,246,0.5)]"
+                      aria-hidden="true"
+                    />
+                  )}
+                  <Icon
+                    className={`relative z-10 w-[18px] h-[18px] shrink-0 ${
+                      isActive ? "text-cyan-700 dark:text-cyan-300" : ""
+                    }`}
+                  />
+                  {!collapsed && <span className="relative z-10 ml-3">{item.label}</span>}
                 </button>
               );
             })}
+
+            <div className="my-2 border-t border-[var(--dm-border)]" />
+
             <button
               type="button"
               onClick={() => handleNav("landing")}
-              title={collapsed ? "Help & Overview" : undefined}
+              title={collapsed ? "Landing & Guide" : undefined}
               className={`flex items-center ${
-                collapsed ? "justify-center" : ""
-              } gap-gutter-sm px-3 py-2.5 rounded text-light-on-surface-variant dark:text-dark-on-surface-variant hover:bg-light-surface-container dark:hover:bg-dark-surface-container hover:text-light-on-surface dark:hover:text-dark-on-surface font-label text-label-lg transition-colors duration-state-change text-left whitespace-nowrap`}
+                collapsed ? "justify-center px-2" : "px-3.5"
+              } py-2.5 rounded-xl text-sm font-medium text-[var(--dm-text-muted)] hover:text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/[0.04] transition-colors text-left whitespace-nowrap`}
             >
-              <span className="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">
-                help
-              </span>
-              {!collapsed && <span>Help &amp; Overview</span>}
+              <HelpCircle className="w-[18px] h-[18px] shrink-0" />
+              {!collapsed && <span className="ml-3">Product Tour</span>}
             </button>
           </nav>
         </div>
 
         {/* User Profile Footer */}
-        <div className="p-gutter-sm border-t border-light-outline-variant/50 dark:border-dark-outline-variant/50">
+        <div className="p-3 border-t border-[var(--dm-border)]">
           <button
             type="button"
             onClick={() => handleNav("settings")}
-            className="w-full flex items-center gap-gutter-sm p-gutter-sm rounded hover:bg-light-surface-container dark:hover:bg-dark-surface-container transition-colors duration-state-change text-left"
+            className={`w-full flex items-center ${
+              collapsed ? "justify-center p-1.5" : "gap-3 p-2"
+            } rounded-xl hover:bg-slate-900/5 dark:hover:bg-white/[0.04] transition-colors text-left`}
+            title={collapsed ? preferences.displayName : "Workspace settings"}
           >
             <AvatarBadge size="md" name={preferences.displayName} />
             {!collapsed && (
               <div className="flex flex-col min-w-0">
-                <span className="font-title text-title-sm text-light-on-surface dark:text-dark-on-surface truncate">
+                <span className="text-sm font-medium text-[var(--dm-text)] truncate">
                   {preferences.displayName}
                 </span>
-                <span className="font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant truncate">
-                  Research Workspace
+                <span className="text-xs text-[var(--dm-text-muted)] truncate">
+                  {preferences.email}
                 </span>
               </div>
             )}
@@ -189,33 +239,43 @@ export const AppShell: React.FC<AppShellProps> = ({
       </aside>
 
       {/* Main Workspace Column */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="sticky top-0 z-30 h-16 bg-light-surface-container-lowest dark:bg-dark-surface-container-lowest border-b border-light-outline-variant/60 dark:border-dark-outline-variant/60 px-gutter-md lg:px-gutter-lg flex items-center justify-between gap-gutter-md">
-          <div className="flex items-center gap-gutter-sm min-w-0">
+      <div className="relative z-10 flex-1 flex flex-col min-w-0">
+        <header className="sticky top-0 z-30 h-16 bg-[var(--dm-bg-secondary)]/80 backdrop-blur-xl border-b border-[var(--dm-border)] px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileOpen(true)}
               aria-label="Open navigation menu"
-              className="lg:hidden inline-flex items-center justify-center w-9 h-9 rounded text-light-on-surface dark:text-dark-on-surface hover:bg-light-surface-container dark:hover:bg-dark-surface-container"
+              className="lg:hidden inline-flex items-center justify-center w-10 h-10 rounded-xl border border-[var(--dm-border)] text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/5 shrink-0"
             >
-              <span className="material-symbols-outlined text-[22px]">menu</span>
+              <Menu className="w-5 h-5" />
             </button>
             <div className="flex flex-col min-w-0">
-              <h1 className="font-headline text-title-lg text-light-on-surface dark:text-dark-on-surface truncate">
+              <h1 className="font-display text-base sm:text-lg font-semibold text-[var(--dm-text)] truncate">
                 {title}
               </h1>
               {subtitle && (
-                <p className="hidden sm:block font-body text-body-sm text-light-on-surface-variant dark:text-dark-on-surface-variant truncate">
+                <p className="hidden sm:block text-xs text-[var(--dm-text-muted)] truncate">
                   {subtitle}
                 </p>
               )}
             </div>
           </div>
 
-          {headerActions && <div className="flex items-center gap-gutter-sm sm:gap-gutter-md shrink-0">{headerActions}</div>}
+          {headerActions && (
+            <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">{headerActions}</div>
+          )}
         </header>
 
-        {children}
+        <motion.div
+          key={activePage}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+          className="flex-1 flex flex-col min-w-0"
+        >
+          {children}
+        </motion.div>
       </div>
     </div>
   );

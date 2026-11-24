@@ -9,7 +9,7 @@ export type ProcessingStatus =
   | "Extracting Text"
   | "Chunking"
   | "Generating Embeddings"
-  | "Indexing in ChromaDB"
+  | "Indexing Vectors"
   | "Indexed Successfully"
   | "Failed";
 
@@ -51,8 +51,8 @@ interface PersistedStore {
   questions_answered: number;
 }
 
-const CHUNK_SIZE_TOKENS = 500;
-const CHUNK_OVERLAP_TOKENS = 100;
+export const CHUNK_SIZE_TOKENS = 500;
+export const CHUNK_OVERLAP_TOKENS = 100;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 const BASE_DATA_DIR = path.resolve(process.cwd(), "data");
@@ -156,7 +156,9 @@ class RagEngine {
 
   private saveStore(): void {
     ensureDirs();
-    fs.writeFileSync(STORE_PATH, JSON.stringify(this.store, null, 2), "utf-8");
+    const tmpPath = `${STORE_PATH}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(this.store, null, 2), "utf-8");
+    fs.renameSync(tmpPath, STORE_PATH);
   }
 
   listDocuments(): DocumentRecord[] {
@@ -171,6 +173,13 @@ class RagEngine {
 
   getTotalChunksCount(): number {
     return this.store.chunks.length;
+  }
+
+  getEmbeddingDimensions(): number | null {
+    const firstWithEmbedding = this.store.chunks.find(
+      (chunk) => Array.isArray(chunk.embedding) && chunk.embedding.length > 0
+    );
+    return firstWithEmbedding ? firstWithEmbedding.embedding.length : null;
   }
 
   private updateStatus(
@@ -275,7 +284,7 @@ class RagEngine {
       this.updateStatus(documentId, "Generating Embeddings", 75);
       const vectors = await generateEmbeddings(rawChunks.map((c) => c.text));
 
-      this.updateStatus(documentId, "Indexing in ChromaDB", 90);
+      this.updateStatus(documentId, "Indexing Vectors", 90);
       const storedChunks: StoredChunk[] = rawChunks.map((c, idx) => ({
         ...c,
         embedding: vectors[idx],
@@ -289,6 +298,13 @@ class RagEngine {
 
       return this.store.documents[documentId];
     } catch (err: unknown) {
+      if (fs.existsSync(safeDiskPath)) {
+        try {
+          fs.unlinkSync(safeDiskPath);
+        } catch {
+          // Ignore cleanup error
+        }
+      }
       const msg = err instanceof Error ? err.message : "Failed to process PDF.";
       this.updateStatus(documentId, "Failed", 0, { error_message: msg });
       throw err;

@@ -1,156 +1,101 @@
 # DocuMind — AI-Powered Document Question Answering with RAG
 
-DocuMind is a Retrieval-Augmented Generation (RAG) application that enables users to upload PDF documents, index their contents into vector embeddings, ask natural-language questions, and receive citation-backed answers grounded strictly in the uploaded files using Google Gemini.
+DocuMind is a Retrieval-Augmented Generation (RAG) web application running inside AI Studio on **Node.js + Express**, **React 19 + TypeScript + Vite**, and **Google Gemini**. Users can upload PDF documents, index their contents into persistent vector storage, ask natural-language questions grounded strictly in uploaded files, inspect retrieved context, and compare RAG vs. Without RAG responses side by side.
 
 ---
 
-## 1. Features
+## 1. Architecture Overview (Active AI Studio Runtime)
 
-- **Multi-PDF Upload & Validation**: Drag-and-drop multiple PDFs (up to 25 MB each), validate binary headers and page count, prevent duplicate SHA-256 indexing, and delete documents along with their stored vectors.
-- **Live Processing Pipeline Tracking**: Real backend status progression (`Uploaded` -> `Extracting Text` -> `Chunking` -> `Generating Embeddings` -> `Indexing in ChromaDB` -> `Indexed Successfully` / `Failed`).
-- **Semantic Chunking & Vector Indexing**: Extracts text per page, splits into ~500-token chunks with ~100-token overlap while preserving filename and page metadata.
-- **AI Document Chat with Citations**: Select specific indexed PDFs, ask questions, and view Gemini answers with expandable source passages, page numbers, and cosine similarity scores.
-- **RAG vs. Without RAG Comparison**: Side-by-side live evaluation sending the exact same query to Gemini without document context vs. with retrieved document chunks.
-- **RAG Pipeline Inspector**: Inspect the top retrieved chunks, chunk IDs, cosine similarity scores, and the exact prompt payload sent to Gemini.
-- **Live Workspace Dashboard**: Real-time counts of uploaded documents, processed pages, indexed chunks, answered questions, and recent conversations.
-- **Light / Dark / System Theme**: Full dual-theme support and configurable Top-K retrieval depth (`3`, `5`, or `8` chunks).
-
----
-
-## 2. Technologies Used
-
-### Frontend
-- **React 19 + TypeScript + Vite**
-- **Tailwind CSS v4** (preserving the DocuMind Stitch design system)
-- **Material Symbols Outlined**
-
-### Python Standalone Backend (`backend/`)
-- **Python 3.11+ / FastAPI / Uvicorn**
-- **pypdf** for per-page PDF text extraction
-- **Sentence Transformers (`all-MiniLM-L6-v2`)** for 384-dimensional dense embeddings
-- **ChromaDB (`PersistentClient`)** for local persistent vector storage
-- **Google Gemini (`google-genai`)** for grounded answer generation
-
-### AI Studio / Node.js Runtime Server (`server.ts`, `server/`)
-- **Express + tsx** serving the Vite SPA on port `3000`
-- **unpdf** for per-page PDF text extraction
-- **Google Gemini (`@google/genai`)**: `gemini-embedding-2` for embeddings and `gemini-4-hydrogen` for answer generation, with persistent disk storage (`data/documind_store.json`) or optional proxy forwarding to the standalone Python FastAPI service via `FASTAPI_BACKEND_URL`.
+- **Frontend**: React 19, TypeScript, Vite, and Tailwind CSS v4 (preserving the DocuMind design system across Light, Dark, and System themes).
+- **Backend Server**: Node.js + Express (`server.ts`, `server/`) running on port `3000` with Vite middleware in development and static `dist/` serving in production.
+- **PDF Processing**: `multer` (25 MB limit per file, up to 10 files per upload) + `unpdf` (`extractText(..., { mergePages: false })`) for per-page text extraction, `%PDF` binary validation, and SHA-256 duplicate prevention.
+- **Chunking**: Splits extracted text per page into overlapping 500-word/token windows (`CHUNK_SIZE_TOKENS = 500`, `CHUNK_OVERLAP_TOKENS = 100`) preserving `{ chunk_id, document_id, filename, page_number, text, token_count }`.
+- **Embeddings**: Google Gemini Embedding API (`gemini-embedding-2`) via `@google/genai`.
+- **Persistent Vector Storage**: Local disk JSON store (`data/documind_store.json`, written atomically via temp-file rename) alongside uploaded PDF binaries in `uploads/`.
+- **Semantic Retrieval**: Exact cosine similarity search across indexed chunk embeddings returning the Top-K matching chunks (default `5`, configurable to `3`, `5`, or `8` in Settings).
+- **Answer Generation & Comparison**: Google Gemini (`gemini-4-hydrogen` via `@google/genai`) used consistently for grounded document Q&A, RAG pipeline inspection, and side-by-side Without-RAG vs. With-RAG evaluation.
 
 ---
 
-## 3. RAG Architecture
+## 2. RAG Workflow
 
-```
-PDF Upload ─▶ Text Extraction (per page) ─▶ 500-Token Chunking (100-token overlap)
-                                                        │
-                                                        ▼
+```text
+PDF Upload (.pdf, <= 25 MB, SHA-256 deduplication)
+  │
+  ▼
+Per-Page Text Extraction (unpdf)
+  │
+  ▼
+Chunking (500-token window, 100-token overlap + filename & page metadata)
+  │
+  ▼
+Embedding Generation (Gemini gemini-embedding-2)
+  │
+  ▼
+Persistent Disk Vector Store (data/documind_store.json)
+  │
+  ▼
 User Question ─▶ Query Embedding ─▶ Cosine Similarity Search ─▶ Top-K Chunks
-                                                        │
-                                                        ▼
-                                     Gemini Prompt (<retrieved_context> + Question)
-                                                        │
-                                                        ▼
-                                      Citation-Backed Answer + Source Passages
+                                                                    │
+                                                                    ▼
+                                     Gemini (gemini-4-hydrogen) with <retrieved_context>
+                                                                    │
+                                                                    ▼
+                                     Citation-Backed Answer + Source Filenames & Pages
 ```
 
 ---
 
-## 4. Installation
+## 3. Features
 
-### Option A: AI Studio / Full-Stack Node.js + Vite Runtime
-1. Install Node.js dependencies:
-   ```bash
-   npm install
-   ```
-2. Configure environment variables (copy `.env.example` to `.env` or set via AI Studio **Settings > Secrets**):
-   ```env
-   GEMINI_API_KEY=your_gemini_api_key_here
-   ```
-
-### Option B: Standalone Python FastAPI + ChromaDB + Sentence Transformers Backend
-1. Create a Python virtual environment and install dependencies:
-   ```bash
-   cd backend
-   python3 -m venv .venv
-   source .venv/bin/activate   # On Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-2. Set `GEMINI_API_KEY` in `.env` at the project root or inside `backend/.env`.
+- **Document Upload & Management**: Drag-and-drop multi-PDF upload, binary and duplicate validation, live pipeline status stages (`Uploaded` → `Extracting Text` → `Chunking` → `Generating Embeddings` → `Indexing Vectors` → `Indexed Successfully`), and full deletion removing both the PDF binary and all stored chunks/vectors.
+- **AI Document Chat**: Select active indexed PDFs, ask questions, view Gemini responses with inline citations (`[Filename.pdf, p. N]`), and expand retrieved passages with similarity scores.
+- **Retrieval & Source References**: Inspect the exact ranked chunks, chunk IDs, cosine similarity scores, distance metrics, and the `<retrieved_context>` prompt payload sent to Gemini.
+- **RAG vs. Without RAG Comparison**: Evaluates the same question using the same Gemini model (`gemini-4-hydrogen`) both without document context and with top-K retrieved passages.
+- **Workspace Dashboard & Settings**: Live document, page, chunk, and Q&A counters, plus Light/Dark/System theme switching and Top-K depth controls.
 
 ---
 
-## 5. Environment Variable Configuration
+## 4. Environment Variables
 
-See `.env.example`:
-- `GEMINI_API_KEY` — Required for Gemini API calls (and Gemini embeddings when using the Node runtime).
-- `FASTAPI_BACKEND_URL` — Optional. Set to `http://127.0.0.1:8000` when running the Express frontend server against the standalone Python FastAPI + ChromaDB backend.
-- `CHROMA_PERSIST_DIR` — Persistent directory for ChromaDB (`./chroma_db` by default).
-- `EMBEDDING_MODEL` — Sentence Transformer model (`all-MiniLM-L6-v2`).
-- `GEMINI_MODEL` — Gemini model ID (`gemini-4-hydrogen`).
-- `MAX_UPLOAD_MB` — Maximum PDF upload size in MB (`25`).
+Configure via AI Studio **Secrets** (or `.env` for local Node.js runs; see `.env.example`):
+
+- `GEMINI_API_KEY` — **Required.** Used server-side for Gemini embeddings (`gemini-embedding-2`) and Gemini chat/comparison (`gemini-4-hydrogen`).
+- `GEMINI_MODEL` — Optional override for chat generation (defaults to `gemini-4-hydrogen`; retired model IDs automatically fall back to `gemini-4-hydrogen`).
+- `APP_URL` — Automatically injected by AI Studio at runtime.
 
 ---
 
-## 6. How to Run Frontend and Backend
+## 5. Installation & Runtime Commands
 
-### Running in AI Studio / Full-Stack Mode (Single Command)
 ```bash
+# Install Node.js dependencies
+npm install
+
+# Run full-stack development server (Express API + Vite SPA on port 3000)
 npm run dev
+
+# Type-check TypeScript
+npm run lint
+
+# Build production frontend bundle
+npm run build
+
+# Start production server
+npm start
 ```
-This starts the Express + Vite server on `http://localhost:3000`.
-
-### Running with the Python FastAPI + ChromaDB Backend Locally
-1. Start the Python FastAPI backend on port `8000`:
-   ```bash
-   cd backend
-   uvicorn app.main:app --reload --port 8000
-   ```
-2. Start the frontend server pointing `/api/*` to FastAPI:
-   ```bash
-   FASTAPI_BACKEND_URL=http://127.0.0.1:8000 npm run dev
-   ```
-3. Open `http://localhost:3000` in your browser.
 
 ---
 
-## 7. How to Upload PDF Documents
+## 6. API Endpoints
 
-1. Navigate to **My Documents** from the left sidebar.
-2. Drag and drop one or more `.pdf` files (or click **Browse PDF Files**).
-3. Observe live status transitions until **Indexed Successfully** appears alongside the extracted page count and generated chunk count.
-4. Click **Delete** on any document card to remove both the file and its indexed vectors.
-
----
-
-## 8. How to Test Document Questions
-
-1. Open **AI Chat** from the sidebar (or click **Preview & Chat** on an indexed document).
-2. Select one or more indexed PDFs in the **Active Documents** panel.
-3. Ask a question specific to your PDFs (or pick a suggested prompt).
-4. Review the grounded Gemini response, expand any **Source N** citation to read the exact retrieved passage and page number, or open **Inspect Full RAG Pipeline** to view similarity scores and the prompt payload.
-
----
-
-## 9. RAG vs. Without RAG Comparison
-
-1. Open **RAG Comparison** from the sidebar.
-2. Enter a question about specific details inside your uploaded PDFs (e.g., policy retention timelines, research metrics, or contract terms).
-3. Click **Run Comparison**:
-   - **Without RAG** sends the raw question directly to Gemini with no retrieval context.
-   - **With RAG** retrieves the top-K matching chunks from your indexed PDFs and grounds Gemini's response with verifiable page citations.
-
----
-
-## 10. Example Output & Verification
-
-- **API Endpoints**:
-  - `GET /api/health` — Backend status and indexed chunk count
-  - `POST /api/documents/upload` — Multipart PDF upload, extraction, chunking, embedding, indexing
-  - `GET /api/documents` — List all documents and statuses
-  - `GET /api/documents/{document_id}` — Single document status
-  - `DELETE /api/documents/{document_id}` — Delete document and its vectors
-  - `POST /api/chat/ask` — Semantic search + grounded Gemini Q&A
-  - `POST /api/chat/compare` — Live Without RAG vs. With RAG comparison
-  - `POST /api/retrieval/inspect` — Full RAG pipeline inspection (top-K chunks, prompt, answer)
-  - `GET /api/dashboard/stats` — Live workspace statistics
-  - `GET /api/chat/history` & `DELETE /api/chat/history` — Conversation history management
+- `GET /api/health` — Backend status, vector store type, embedding/chat model IDs, API key status, and indexed chunk count
+- `GET /api/documents` — List all uploaded/indexed documents
+- `GET /api/documents/:documentId` — Get metadata and status for one document
+- `POST /api/documents/upload` — Multipart PDF upload (`files`), extraction, chunking, embedding, and persistent indexing
+- `DELETE /api/documents/:documentId` — Delete document binary, metadata, and associated vector chunks
+- `POST /api/chat/ask` — Embed query, run cosine similarity Top-K retrieval, and generate grounded Gemini answer
+- `POST /api/chat/compare` (alias `POST /api/rag/compare`) — Live Without-RAG vs. With-RAG comparison using the same Gemini model
+- `POST /api/retrieval/inspect` — Return ranked chunks, similarity scores, prompt payload, and grounded Gemini answer
+- `GET /api/chat/history` & `DELETE /api/chat/history` — Fetch or clear conversation history
+- `GET /api/dashboard/stats` — Live workspace metrics and recent activity

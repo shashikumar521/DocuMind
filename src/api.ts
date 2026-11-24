@@ -3,6 +3,7 @@ import {
   ConversationTurn,
   DashboardStats,
   DocuMindDocument,
+  HealthStatus,
   RetrievalInspectResponse,
   RetrievedChunk,
 } from "./types";
@@ -29,12 +30,7 @@ async function parseResponse<T>(res: Response): Promise<T> {
   return data as unknown as T;
 }
 
-export async function fetchHealth(): Promise<{
-  status: string;
-  backend: string;
-  gemini_configured: boolean;
-  chunks_count: number;
-}> {
+export async function fetchHealth(): Promise<HealthStatus> {
   const res = await fetch("/api/health");
   return parseResponse(res);
 }
