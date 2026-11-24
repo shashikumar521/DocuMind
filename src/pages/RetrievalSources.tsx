@@ -38,7 +38,7 @@ const PIPELINE_STEPS: {
   { id: "extract", num: "02", title: "Text Extraction", sub: "Per-page parsing", icon: Layers },
   { id: "chunk", num: "03", title: "Chunking", sub: "Overlap window", icon: Cpu },
   { id: "embed", num: "04", title: "Embedding Gen", sub: "Dense vectors", icon: Binary },
-  { id: "store", num: "05", title: "Vector Storage", sub: "Disk JSON store", icon: Database },
+  { id: "store", num: "05", title: "Vector Storage", sub: "PostgreSQL + Blob", icon: Database },
   { id: "retrieve", num: "06", title: "Similarity Search", sub: "Cosine Top-K", icon: Search },
   { id: "generate", num: "07", title: "Gemini Response", sub: "Cited synthesis", icon: MessageSquareText },
 ];
@@ -261,7 +261,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
             <div>
               <span className="text-[var(--dm-text-muted)] block">Vector Storage</span>
               <span className="font-mono font-semibold text-[var(--dm-text)] truncate block">
-                {health?.storage_file || "data/documind_store.json"}
+                {health?.storage_file || "PostgreSQL (pgvector) + Vercel Blob"}
               </span>
             </div>
           </div>

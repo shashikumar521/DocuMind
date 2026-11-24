@@ -494,14 +494,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                   Transparent End-to-End Architecture
                 </h2>
                 <p className="mt-2.5 text-sm sm:text-base text-[var(--dm-text-muted)] leading-relaxed">
-                  Powered by Node.js, Express, per-page PDF parsing, Gemini Embeddings, persistent
-                  disk vector storage, and grounded Gemini generation. Compare RAG vs. ungrounded
-                  answers live inside the workspace.
+                  Powered by Node.js, Express, per-page PDF parsing, Gemini Embeddings, durable
+                  PostgreSQL (pgvector) &amp; object storage, and grounded Gemini generation. Compare
+                  RAG vs. ungrounded answers live inside the workspace.
                 </p>
                 <div className="mt-6 grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs text-[var(--dm-text-secondary)]">
                   <div className="flex items-center gap-2">
                     <Database className="w-4 h-4 text-cyan-700 dark:text-cyan-300 shrink-0" />
-                    <span>Persistent JSON Vector Store</span>
+                    <span>Durable Vector &amp; Blob Storage</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Binary className="w-4 h-4 text-violet-700 dark:text-violet-300 shrink-0" />

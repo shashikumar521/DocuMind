@@ -1,0 +1,11 @@
+backend/
+data/
+uploads/
+chroma_db/
+.venv/
+venv/
+__pycache__/
+workspace/
+*.pyc
+.env
+.env.local

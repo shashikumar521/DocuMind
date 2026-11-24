@@ -87,7 +87,9 @@ export interface RetrievalInspectResponse {
 export interface HealthStatus {
   status: string;
   backend: string;
+  storage_mode?: string;
   vector_store: string;
+  object_storage?: string;
   embedding_model: string;
   embedding_dimensions: number | null;
   gemini_model: string;
