@@ -120,12 +120,12 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Enter a query to trace embedding retrieval, similarity scores, and Gemini prompt payload..."
-              className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none"
+              className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-blue-400 focus:outline-none"
             />
             <button
               type="submit"
               disabled={loading || !query.trim()}
-              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all disabled:opacity-45 shrink-0 whitespace-nowrap"
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all disabled:opacity-45 shrink-0 whitespace-nowrap"
             >
               {loading ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -202,7 +202,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
                       <span
                         className={`w-8 h-8 rounded-xl border flex items-center justify-center ${
                           active
-                            ? "bg-violet-500/15 border-violet-400/35 text-cyan-700 dark:text-cyan-300"
+                            ? "bg-blue-500/15 border-blue-400/35 text-cyan-700 dark:text-cyan-300"
                             : "bg-slate-900/5 dark:bg-white/5 border-[var(--dm-border)] text-[var(--dm-text-muted)]"
                         }`}
                       >
@@ -254,7 +254,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
             </div>
             <div>
               <span className="text-[var(--dm-text-muted)] block">Generation Model</span>
-              <span className="font-mono font-semibold text-violet-700 dark:text-violet-300">
+              <span className="font-mono font-semibold text-blue-700 dark:text-blue-300">
                 {result?.model || health?.gemini_model || "gemini-4-hydrogen"}
               </span>
             </div>
@@ -305,11 +305,11 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
                 {result.chunks.map((chunk) => (
                   <article
                     key={chunk.chunk_id}
-                    className="dm-card p-4 sm:p-5 flex flex-col gap-3 hover:border-violet-400/35 transition-colors"
+                    className="dm-card p-4 sm:p-5 flex flex-col gap-3 hover:border-blue-400/35 transition-colors"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className="font-mono font-semibold text-violet-700 dark:text-violet-300 tabular-nums">
+                        <span className="font-mono font-semibold text-blue-700 dark:text-blue-300 tabular-nums">
                           #{chunk.rank}
                         </span>
                         <span className="font-display font-semibold text-[var(--dm-text)] truncate">
@@ -327,7 +327,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
                     {/* Visual similarity meter */}
                     <div className="w-full h-1.5 rounded-full bg-slate-900/10 dark:bg-white/5 overflow-hidden">
                       <div
-                        className="h-1.5 rounded-full bg-gradient-to-r from-violet-500 to-cyan-400"
+                        className="h-1.5 rounded-full bg-gradient-to-r from-blue-500 to-cyan-400"
                         style={{ width: `${Math.max(4, Math.min(100, chunk.similarity * 100))}%` }}
                       />
                     </div>

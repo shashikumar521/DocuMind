@@ -1,0 +1,20 @@
+{
+  "name": "DocuMind — AI Document Intelligence & RAG Platform",
+  "short_name": "DocuMind",
+  "description": "Upload PDF documents, explore semantic embeddings, and receive citation-backed Gemini AI answers grounded in Retrieval-Augmented Generation.",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#080b16",
+  "background_color": "#080b16",
+  "display": "standalone"
+}

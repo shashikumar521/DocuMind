@@ -1,76 +1,170 @@
-import React from "react";
+import React, { useState } from "react";
 import { motion } from "motion/react";
+
+export type LogoSize = "xs" | "sm" | "md" | "lg";
+export type LogoTone = "auto" | "dark" | "light";
 
 interface DocuMindLogoProps {
   compact?: boolean;
   animated?: boolean;
+  size?: LogoSize;
+  tone?: LogoTone;
+  className?: string;
 }
+
+interface DocuMindMarkProps {
+  size?: LogoSize;
+  className?: string;
+}
+
+const MARK_SIZE_CLASSES: Record<LogoSize, string> = {
+  xs: "w-5 h-5",
+  sm: "w-7 h-7",
+  md: "w-8 h-8",
+  lg: "w-12 h-12",
+};
+
+const FULL_LOGO_HEIGHT_CLASSES: Record<LogoSize, string> = {
+  xs: "h-6",
+  sm: "h-7",
+  md: "h-8 sm:h-9",
+  lg: "h-10 sm:h-12",
+};
+
+export const DocuMindMark: React.FC<DocuMindMarkProps> = ({
+  size = "md",
+  className = "",
+}) => {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <span
+        aria-label="DocuMind"
+        className={`${MARK_SIZE_CLASSES[size]} rounded-lg bg-gradient-to-br from-blue-600 to-cyan-400 text-white font-display font-bold text-xs inline-flex items-center justify-center shrink-0 ${className}`}
+      >
+        DM
+      </span>
+    );
+  }
+
+  return (
+    <img
+      src="/assets/documind-icon.png"
+      alt="DocuMind"
+      referrerPolicy="no-referrer"
+      draggable={false}
+      onError={() => setFailed(true)}
+      className={`${MARK_SIZE_CLASSES[size]} object-contain shrink-0 select-none ${className}`}
+    />
+  );
+};
 
 export const DocuMindLogo: React.FC<DocuMindLogoProps> = ({
   compact = false,
   animated = true,
+  size = "md",
+  tone = "auto",
+  className = "",
 }) => {
-  const Mark = (
-    <div className="relative w-9 h-9 rounded-xl bg-gradient-to-br from-violet-500/25 via-indigo-500/20 to-cyan-400/25 border border-violet-400/35 flex items-center justify-center shrink-0 shadow-[0_0_20px_-6px_rgba(139,92,246,0.65)]">
-      <svg
-        width="20"
-        height="20"
-        viewBox="0 0 24 24"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        aria-hidden="true"
-      >
-        <path
-          d="M6.5 3.5H14.5L19 8V19.5C19 20.3284 18.3284 21 17.5 21H6.5C5.67157 21 5 20.3284 5 19.5V5C5 4.17157 5.67157 3.5 6.5 3.5Z"
-          stroke="url(#dmLogoStroke)"
-          strokeWidth="1.75"
-          strokeLinejoin="round"
-        />
-        <path
-          d="M14 3.5V8.5H19"
-          stroke="#22D3EE"
-          strokeWidth="1.75"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        <circle cx="9.5" cy="13.5" r="1.4" fill="#A78BFA" />
-        <circle cx="14.5" cy="13.5" r="1.4" fill="#22D3EE" />
-        <circle cx="12" cy="17" r="1.4" fill="#F8FAFC" />
-        <path
-          d="M10.7 13.5H13.3M10.2 14.6L11.3 15.9M13.8 14.6L12.7 15.9"
-          stroke="#94A3B8"
-          strokeWidth="1.2"
-          strokeLinecap="round"
-        />
-        <defs>
-          <linearGradient id="dmLogoStroke" x1="5" y1="3.5" x2="19" y2="21" gradientUnits="userSpaceOnUse">
-            <stop stopColor="#A78BFA" />
-            <stop offset="1" stopColor="#22D3EE" />
-          </linearGradient>
-        </defs>
-      </svg>
-    </div>
-  );
+  const [lightFailed, setLightFailed] = useState(false);
+  const [darkFailed, setDarkFailed] = useState(false);
 
-  return (
-    <span className="inline-flex items-center gap-2.5 whitespace-nowrap shrink-0">
-      {animated ? (
-        <motion.span
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-          className="inline-flex"
-        >
-          {Mark}
-        </motion.span>
+  const heightCls = FULL_LOGO_HEIGHT_CLASSES[size];
+
+  const FullLogo = (
+    <span className={`inline-flex items-center shrink-0 ${className}`}>
+      {tone === "light" ? (
+        lightFailed ? (
+          <DocuMindTextFallback />
+        ) : (
+          <img
+            src="/assets/documind-logo-light.png"
+            alt="DocuMind"
+            referrerPolicy="no-referrer"
+            draggable={false}
+            onError={() => setLightFailed(true)}
+            className={`${heightCls} w-auto object-contain shrink-0 select-none`}
+          />
+        )
+      ) : tone === "dark" ? (
+        darkFailed ? (
+          <DocuMindTextFallback />
+        ) : (
+          <img
+            src="/assets/documind-logo-dark.png"
+            alt="DocuMind"
+            referrerPolicy="no-referrer"
+            draggable={false}
+            onError={() => setDarkFailed(true)}
+            className={`${heightCls} w-auto object-contain shrink-0 select-none`}
+          />
+        )
       ) : (
-        Mark
-      )}
-      {!compact && (
-        <span className="font-display font-bold text-[18px] tracking-tight text-[var(--dm-text)] leading-none">
-          Docu<span className="bg-gradient-to-r from-violet-400 to-cyan-300 bg-clip-text text-transparent">Mind</span>
-        </span>
+        <>
+          {lightFailed ? (
+            <span className="dark:hidden">
+              <DocuMindTextFallback />
+            </span>
+          ) : (
+            <img
+              src="/assets/documind-logo-light.png"
+              alt="DocuMind"
+              referrerPolicy="no-referrer"
+              draggable={false}
+              onError={() => setLightFailed(true)}
+              className={`${heightCls} w-auto object-contain shrink-0 select-none dark:hidden`}
+            />
+          )}
+          {darkFailed ? (
+            <span className="hidden dark:inline-flex">
+              <DocuMindTextFallback />
+            </span>
+          ) : (
+            <img
+              src="/assets/documind-logo-dark.png"
+              alt="DocuMind"
+              referrerPolicy="no-referrer"
+              draggable={false}
+              onError={() => setDarkFailed(true)}
+              className={`${heightCls} w-auto object-contain shrink-0 select-none hidden dark:block`}
+            />
+          )}
+        </>
       )}
     </span>
   );
+
+  const content = compact ? <DocuMindMark size={size} className={className} /> : FullLogo;
+
+  if (!animated) {
+    return (
+      <span className="inline-flex items-center whitespace-nowrap shrink-0">
+        {content}
+      </span>
+    );
+  }
+
+  return (
+    <motion.span
+      initial={{ opacity: 0, scale: 0.96 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+      className="inline-flex items-center whitespace-nowrap shrink-0"
+    >
+      {content}
+    </motion.span>
+  );
 };
+
+const DocuMindTextFallback: React.FC = () => (
+  <span className="inline-flex items-center gap-2 font-display font-bold text-[18px] tracking-tight text-[var(--dm-text)] leading-none">
+    <DocuMindMark size="sm" />
+    <span>
+      Docu
+      <span className="bg-gradient-to-r from-blue-600 to-cyan-400 bg-clip-text text-transparent">
+        Mind
+      </span>
+    </span>
+  </span>
+);

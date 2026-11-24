@@ -7,12 +7,10 @@ import {
   Copy,
   FileText,
   History,
-  MessageSquareText,
   PanelRightClose,
   PanelRightOpen,
   RefreshCw,
   Send,
-  Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -24,6 +22,7 @@ import {
 } from "../api";
 import { AppShell } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { DocuMindLogo, DocuMindMark } from "../components/DocuMindLogo";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { useToast } from "../components/ToastProvider";
 import {
@@ -245,7 +244,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
           <button
             type="button"
             onClick={() => setShowSourcesPanel((prev) => !prev)}
-            className="hidden lg:inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-xs font-medium text-[var(--dm-text)] hover:border-violet-400/40 transition-colors whitespace-nowrap tabular-nums"
+            className="hidden lg:inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-xs font-medium text-[var(--dm-text)] hover:border-blue-400/40 transition-colors whitespace-nowrap tabular-nums"
           >
             {showSourcesPanel ? (
               <PanelRightClose className="w-4 h-4 text-cyan-700 dark:text-cyan-300" />
@@ -273,7 +272,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
               onClick={() => setMobileTab(tab.id)}
               className={`py-2 rounded-lg text-xs font-medium transition-colors ${
                 mobileTab === tab.id
-                  ? "bg-violet-500/20 text-[var(--dm-text)] border border-violet-400/35"
+                  ? "bg-blue-500/20 text-[var(--dm-text)] border border-blue-400/35"
                   : "text-[var(--dm-text-muted)]"
               }`}
             >
@@ -298,7 +297,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
               onClick={() => setSidebarTab("documents")}
               className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                 sidebarTab === "documents"
-                  ? "bg-violet-500/20 text-[var(--dm-text)]"
+                  ? "bg-blue-500/20 text-[var(--dm-text)]"
                   : "text-[var(--dm-text-muted)] hover:text-[var(--dm-text)]"
               }`}
             >
@@ -310,7 +309,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
               onClick={() => setSidebarTab("history")}
               className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                 sidebarTab === "history"
-                  ? "bg-violet-500/20 text-[var(--dm-text)]"
+                  ? "bg-blue-500/20 text-[var(--dm-text)]"
                   : "text-[var(--dm-text-muted)] hover:text-[var(--dm-text)]"
               }`}
             >
@@ -341,7 +340,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                   <button
                     type="button"
                     onClick={() => onNavigate("documents")}
-                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 text-white text-xs font-semibold"
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white text-xs font-semibold"
                   >
                     <Upload className="w-3.5 h-3.5" />
                     <span>Upload PDFs</span>
@@ -356,7 +355,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                       key={doc.id}
                       className={`p-3 rounded-xl border transition-colors flex items-start gap-2.5 ${
                         checked
-                          ? "bg-violet-500/10 border-violet-400/45"
+                          ? "bg-blue-500/10 border-blue-400/45"
                           : "bg-[var(--dm-surface)] border-[var(--dm-border)]"
                       } ${isIndexed ? "cursor-pointer" : "opacity-55 cursor-not-allowed"}`}
                     >
@@ -365,7 +364,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                         disabled={!isIndexed}
                         checked={checked}
                         onChange={() => toggleDoc(doc.id)}
-                        className="mt-0.5 rounded accent-violet-500"
+                        className="mt-0.5 rounded accent-blue-500"
                       />
                       <div className="min-w-0">
                         <p className="text-xs font-semibold text-[var(--dm-text)] truncate">
@@ -424,8 +423,8 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
           <div className="flex-1 p-4 sm:p-6 flex flex-col gap-5 overflow-y-auto max-h-[calc(100vh-14.5rem)]">
             {history.length === 0 && !asking && (
               <div className="my-auto max-w-xl mx-auto text-center py-8 flex flex-col items-center gap-4">
-                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-violet-500/20 to-cyan-500/20 border border-violet-400/35 text-cyan-700 dark:text-cyan-300 flex items-center justify-center">
-                  <Sparkles className="w-6 h-6" aria-hidden="true" />
+                <div className="px-4 py-2 rounded-2xl bg-[var(--dm-surface)] border border-[var(--dm-border)] shadow-sm">
+                  <DocuMindLogo size="md" animated={false} />
                 </div>
                 <h2 className="font-display text-2xl font-bold text-[var(--dm-text)] text-balance">
                   Ask anything about your documents.
@@ -442,15 +441,15 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
               <React.Fragment key={turn.id}>
                 {/* User Message */}
                 <div className="flex justify-end">
-                  <div className="max-w-xl rounded-2xl rounded-tr-sm px-4 py-3 bg-gradient-to-r from-violet-600/90 to-indigo-600/90 text-white shadow-sm">
+                  <div className="max-w-xl rounded-2xl rounded-tr-sm px-4 py-3 bg-gradient-to-r from-blue-600 to-sky-600 text-white shadow-sm">
                     <p className="text-sm whitespace-pre-wrap leading-relaxed">{turn.question}</p>
                   </div>
                 </div>
 
                 {/* Assistant Message */}
                 <div className="flex items-start gap-3 max-w-2xl">
-                  <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-500/25 border border-violet-400/35 text-cyan-700 dark:text-cyan-300 flex items-center justify-center shrink-0 mt-0.5">
-                    <MessageSquareText className="w-4 h-4" aria-hidden="true" />
+                  <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-400/30 flex items-center justify-center shrink-0 mt-0.5">
+                    <DocuMindMark size="xs" />
                   </div>
 
                   <div className="flex-1 dm-card p-4 sm:p-5 flex flex-col gap-3.5 min-w-0">
@@ -538,18 +537,18 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
             {/* Animated Typing Indicator */}
             {asking && (
               <div className="flex items-start gap-3 max-w-md">
-                <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/25 to-cyan-500/25 border border-violet-400/35 text-cyan-700 dark:text-cyan-300 flex items-center justify-center shrink-0">
-                  <MessageSquareText className="w-4 h-4" aria-hidden="true" />
+                <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-400/30 flex items-center justify-center shrink-0">
+                  <DocuMindMark size="xs" />
                 </div>
                 <div className="dm-card px-4 py-3 flex items-center gap-3">
                   <div className="flex items-center gap-1" aria-hidden="true">
-                    <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-dm-typing" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-dm-typing" />
                     <span
                       className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-dm-typing"
                       style={{ animationDelay: "0.18s" }}
                     />
                     <span
-                      className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-dm-typing"
+                      className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-dm-typing"
                       style={{ animationDelay: "0.36s" }}
                     />
                   </div>
@@ -580,7 +579,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                   key={prompt}
                   type="button"
                   onClick={() => setQuestionInput(prompt)}
-                  className="px-3 py-1.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] hover:border-violet-400/45 text-xs text-[var(--dm-text-secondary)] hover:text-[var(--dm-text)] transition-colors text-left"
+                  className="px-3 py-1.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] hover:border-blue-400/45 text-xs text-[var(--dm-text-secondary)] hover:text-[var(--dm-text)] transition-colors text-left"
                 >
                   {prompt}
                 </button>
@@ -599,12 +598,12 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                 value={questionInput}
                 onChange={(e) => setQuestionInput(e.target.value)}
                 placeholder="Ask a question grounded in your selected PDFs..."
-                className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none"
+                className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-blue-400 focus:outline-none"
               />
               <button
                 type="submit"
                 disabled={asking || !questionInput.trim()}
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all disabled:opacity-45 shrink-0 whitespace-nowrap"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all disabled:opacity-45 shrink-0 whitespace-nowrap"
               >
                 <span className="hidden sm:inline">{asking ? "Thinking..." : "Send"}</span>
                 <Send className="w-4 h-4" />
@@ -648,7 +647,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                       className={`p-3.5 rounded-xl border cursor-pointer transition-all flex flex-col gap-2 ${
                         isHighlighted
                           ? "bg-cyan-500/10 border-cyan-400/55 shadow-[0_0_20px_-8px_rgba(34,211,238,0.65)]"
-                          : "bg-[var(--dm-surface)] border-[var(--dm-border)] hover:border-violet-400/40"
+                          : "bg-[var(--dm-surface)] border-[var(--dm-border)] hover:border-blue-400/40"
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2 text-xs">
@@ -679,7 +678,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                 if (lastQ) onInspectQuery(lastQ);
                 onNavigate("retrieval");
               }}
-              className="mt-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[var(--dm-border)] bg-[var(--dm-surface)] hover:border-violet-400/45 text-xs font-semibold text-cyan-700 dark:text-cyan-300 transition-colors"
+              className="mt-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[var(--dm-border)] bg-[var(--dm-surface)] hover:border-blue-400/45 text-xs font-semibold text-cyan-700 dark:text-cyan-300 transition-colors"
             >
               <span>Inspect in Pipeline</span>
               <ChevronRight className="w-4 h-4" />

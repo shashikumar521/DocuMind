@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import path from "path";
-import { extractText } from "unpdf";
+import { extractText, getDocumentProxy } from "unpdf";
 import { generateEmbeddings, RetrievedChunkRef } from "./geminiClient.js";
 import {
   ConversationRecord,
@@ -168,7 +168,13 @@ class RagEngine {
 
     try {
       await this.updateStatus(documentId, "Extracting Text", 25);
-      const extracted = await extractText(new Uint8Array(buffer), { mergePages: false });
+      const pdf = await getDocumentProxy(new Uint8Array(buffer), { verbosity: 0 });
+      let extracted: { totalPages: number; text: string[] };
+      try {
+        extracted = await extractText(pdf, { mergePages: false });
+      } finally {
+        await pdf.loadingTask?.destroy?.();
+      }
       const totalPages = extracted.totalPages || 0;
       const pageTexts = Array.isArray(extracted.text) ? extracted.text : [];
 

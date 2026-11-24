@@ -12,11 +12,10 @@ import {
   MessageSquareText,
   Quote,
   Search,
-  Sparkles,
   X,
 } from "lucide-react";
 import { RoutePage } from "../types";
-import { DocuMindLogo } from "../components/DocuMindLogo";
+import { DocuMindLogo, DocuMindMark } from "../components/DocuMindLogo";
 
 interface LandingPageProps {
   onNavigate: (page: RoutePage) => void;
@@ -29,7 +28,7 @@ interface PipelineNode {
   subtitle: string;
   detail: string;
   icon: React.ComponentType<{ className?: string }>;
-  accent: "violet" | "cyan";
+  accent: "blue" | "cyan";
 }
 
 const PIPELINE_NODES: PipelineNode[] = [
@@ -40,7 +39,7 @@ const PIPELINE_NODES: PipelineNode[] = [
     subtitle: "Validated ingestion",
     detail: "Multi-PDF upload up to 25 MB with binary verification and SHA-256 deduplication.",
     icon: FileText,
-    accent: "violet",
+    accent: "blue",
   },
   {
     id: "extract",
@@ -58,7 +57,7 @@ const PIPELINE_NODES: PipelineNode[] = [
     subtitle: "500 tokens · 100 overlap",
     detail: "Splits pages into overlapping semantic windows so cross-boundary concepts remain intact.",
     icon: Cpu,
-    accent: "violet",
+    accent: "blue",
   },
   {
     id: "embed",
@@ -76,7 +75,7 @@ const PIPELINE_NODES: PipelineNode[] = [
     subtitle: "Cosine Top-K search",
     detail: "Ranks stored chunk vectors against your embedded question to surface the closest evidence.",
     icon: Search,
-    accent: "violet",
+    accent: "blue",
   },
   {
     id: "answer",
@@ -115,7 +114,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
     <div className="min-h-screen flex flex-col bg-[var(--dm-bg)] text-[var(--dm-text)] relative overflow-x-hidden">
       {/* Animated Atmospheric Background */}
       <div aria-hidden="true" className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
-        <div className="animate-dm-aurora absolute -top-48 left-1/4 w-[620px] h-[620px] rounded-full bg-violet-600/15 blur-[140px]" />
+        <div className="animate-dm-aurora absolute -top-48 left-1/4 w-[620px] h-[620px] rounded-full bg-blue-600/15 blur-[140px]" />
         <div className="animate-dm-aurora absolute top-1/3 right-0 w-[520px] h-[520px] rounded-full bg-cyan-500/10 blur-[140px]" />
         <div
           className="absolute inset-0 opacity-[0.035]"
@@ -146,9 +145,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
           <button
             type="button"
             onClick={() => scrollToSection("hero")}
-            className="focus-visible:outline-2 focus-visible:outline-violet-400 rounded-lg whitespace-nowrap shrink-0"
+            aria-label="DocuMind Home"
+            className="focus-visible:outline-2 focus-visible:outline-blue-400 rounded-lg whitespace-nowrap shrink-0"
           >
-            <DocuMindLogo />
+            <DocuMindLogo size="md" />
           </button>
 
           <nav aria-label="Primary" className="hidden md:flex items-center gap-8">
@@ -179,7 +179,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
             <button
               type="button"
               onClick={() => onNavigate("dashboard")}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold shadow-[0_8px_24px_-8px_rgba(139,92,246,0.7)] transition-all duration-150 whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-sm font-semibold shadow-[0_8px_24px_-8px_rgba(37,99,235,0.7)] transition-all duration-150 whitespace-nowrap shrink-0"
             >
               <span>Get Started</span>
               <ArrowRight className="w-4 h-4" />
@@ -224,7 +224,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
               <button
                 type="button"
                 onClick={() => onNavigate("dashboard")}
-                className="mt-2 w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 text-white text-sm font-semibold"
+                className="mt-2 w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white text-sm font-semibold"
               >
                 <span>Get Started</span>
                 <ArrowRight className="w-4 h-4" />
@@ -244,14 +244,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
               transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
               className="max-w-3xl mx-auto text-center flex flex-col items-center gap-6"
             >
-              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-violet-500/10 border border-violet-400/30 text-xs font-medium text-cyan-700 dark:text-cyan-300">
-                <Sparkles className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400" aria-hidden="true" />
+              <div className="inline-flex items-center gap-2.5 text-xs font-medium text-blue-700 dark:text-cyan-300">
+                <DocuMindMark size="xs" />
                 <span>AI-Powered Document Intelligence</span>
               </div>
 
               <h1 className="font-display font-bold text-4xl sm:text-5xl lg:text-[56px] lg:leading-[1.08] tracking-tight text-[var(--dm-text)] text-balance">
                 Your Documents.{" "}
-                <span className="bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-600 dark:from-violet-400 dark:via-indigo-300 dark:to-cyan-300 bg-clip-text text-transparent">
+                <span className="bg-gradient-to-r from-blue-600 via-sky-500 to-cyan-500 dark:from-blue-400 dark:via-sky-300 dark:to-cyan-300 bg-clip-text text-transparent">
                   Understood by AI.
                 </span>
               </h1>
@@ -266,7 +266,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                 <button
                   type="button"
                   onClick={() => onNavigate("dashboard")}
-                  className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold shadow-[0_12px_32px_-10px_rgba(139,92,246,0.75)] transition-all duration-150 whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-sm font-semibold shadow-[0_12px_32px_-10px_rgba(37,99,235,0.75)] transition-all duration-150 whitespace-nowrap shrink-0"
                 >
                   <span>Start Exploring</span>
                   <ArrowRight className="w-4 h-4" />
@@ -336,9 +336,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                   />
                   <defs>
                     <linearGradient id="dmPipeGradient" x1="0" y1="0" x2="1000" y2="0" gradientUnits="userSpaceOnUse">
-                      <stop stopColor="#8B5CF6" />
-                      <stop offset="0.5" stopColor="#22D3EE" />
-                      <stop offset="1" stopColor="#8B5CF6" />
+                      <stop stopColor="#2563EB" />
+                      <stop offset="0.5" stopColor="#0EA5E9" />
+                      <stop offset="1" stopColor="#22D3EE" />
                     </linearGradient>
                   </defs>
                 </svg>
@@ -348,12 +348,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                     const Icon = node.icon;
                     const selected = node.id === activeNode.id;
                     const accentRing =
-                      node.accent === "violet"
-                        ? "border-violet-400/55 shadow-[0_0_24px_-8px_rgba(139,92,246,0.75)]"
+                      node.accent === "blue"
+                        ? "border-blue-400/55 shadow-[0_0_24px_-8px_rgba(37,99,235,0.65)]"
                         : "border-cyan-400/55 shadow-[0_0_24px_-8px_rgba(34,211,238,0.7)]";
                     const iconBox =
-                      node.accent === "violet"
-                        ? "bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-400/30"
+                      node.accent === "blue"
+                        ? "bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-400/30"
                         : "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border-cyan-400/30";
 
                     return (
@@ -366,7 +366,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                         className={`text-left p-4 rounded-2xl border transition-all duration-150 flex flex-col gap-3 ${
                           selected
                             ? `bg-[var(--dm-surface-elevated)] ${accentRing}`
-                            : "bg-[var(--dm-bg-secondary)]/80 border-[var(--dm-border)] hover:border-violet-400/35"
+                            : "bg-[var(--dm-bg-secondary)]/80 border-[var(--dm-border)] hover:border-blue-400/35"
                         }`}
                       >
                         <div className="flex items-center justify-between">
@@ -412,7 +412,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                 <button
                   type="button"
                   onClick={() => onNavigate("documents")}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 border border-violet-400/30 text-xs font-semibold text-violet-700 dark:text-violet-200 transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-500/15 hover:bg-blue-500/25 border border-blue-400/30 text-xs font-semibold text-blue-700 dark:text-blue-200 transition-colors whitespace-nowrap shrink-0"
                 >
                   <span>Try with a PDF</span>
                   <ArrowRight className="w-3.5 h-3.5" />
@@ -440,7 +440,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                   icon: FileText,
                   title: "Intelligent PDF Understanding",
                   desc: "Upload multi-page PDFs with automated text extraction, overlapping chunking, and real-time indexing status.",
-                  tone: "text-violet-700 dark:text-violet-300 bg-violet-500/15 border-violet-400/25",
+                  tone: "text-blue-700 dark:text-blue-300 bg-blue-500/15 border-blue-400/25",
                 },
                 {
                   icon: Search,
@@ -452,7 +452,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                   icon: MessageSquareText,
                   title: "Context-Aware AI Answers",
                   desc: "Ask targeted questions or compare standard LLM output against RAG-grounded synthesis side by side.",
-                  tone: "text-violet-700 dark:text-violet-300 bg-violet-500/15 border-violet-400/25",
+                  tone: "text-blue-700 dark:text-blue-300 bg-blue-500/15 border-blue-400/25",
                 },
                 {
                   icon: Quote,
@@ -465,7 +465,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                 return (
                   <article
                     key={feat.title}
-                    className="dm-card p-6 flex flex-col gap-4 hover:border-violet-400/35 transition-colors duration-150"
+                    className="dm-card p-6 flex flex-col gap-4 hover:border-blue-400/35 transition-colors duration-150"
                   >
                     <div
                       className={`w-10 h-10 rounded-xl border flex items-center justify-center ${feat.tone}`}
@@ -504,7 +504,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                     <span>Durable Vector &amp; Blob Storage</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Binary className="w-4 h-4 text-violet-700 dark:text-violet-300 shrink-0" />
+                    <Binary className="w-4 h-4 text-blue-700 dark:text-blue-300 shrink-0" />
                     <span>Gemini Embedding Vectors</span>
                   </div>
                   <div className="flex items-center gap-2">
@@ -525,7 +525,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                 <button
                   type="button"
                   onClick={() => onNavigate("dashboard")}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all whitespace-nowrap"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all whitespace-nowrap"
                 >
                   <span>Open Workspace</span>
                   <ArrowRight className="w-4 h-4" />
@@ -540,7 +540,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
       <footer className="relative z-10 border-t border-[var(--dm-border)] bg-[var(--dm-bg-secondary)]/70 py-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <DocuMindLogo animated={false} />
+            <DocuMindLogo size="sm" animated={false} />
             <span className="text-xs text-[var(--dm-text-muted)]">
               Document Intelligence &amp; Grounded RAG Workspace
             </span>

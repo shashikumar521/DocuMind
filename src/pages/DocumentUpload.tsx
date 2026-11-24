@@ -16,6 +16,7 @@ import {
 import { deleteDocumentById, fetchDocuments, uploadPdfFiles } from "../api";
 import { AppShell } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { DocuMindMark } from "../components/DocuMindLogo";
 import { useToast } from "../components/ToastProvider";
 import { DocuMindDocument, ProcessingStatus, RoutePage, UserPreferences } from "../types";
 
@@ -242,7 +243,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
           <button
             type="button"
             onClick={() => onNavigate("chat")}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 border border-violet-400/35 text-xs sm:text-sm font-medium text-violet-700 dark:text-violet-200 transition-colors whitespace-nowrap"
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-blue-500/15 hover:bg-blue-500/25 border border-blue-400/35 text-xs sm:text-sm font-medium text-blue-700 dark:text-blue-200 transition-colors whitespace-nowrap"
           >
             <MessageSquareText className="w-4 h-4" />
             <span>Open AI Chat</span>
@@ -266,10 +267,10 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
           className={`dm-card p-6 sm:p-8 border-2 border-dashed transition-all duration-150 flex flex-col items-center text-center gap-4 ${
             isDragging
               ? "border-cyan-400 bg-cyan-500/10"
-              : "border-violet-400/35 hover:border-violet-400/60"
+              : "border-blue-400/35 hover:border-blue-400/60"
           }`}
         >
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-500/20 to-cyan-500/20 border border-violet-400/30 text-cyan-700 dark:text-cyan-300 flex items-center justify-center">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-500/20 to-cyan-500/20 border border-blue-400/30 text-cyan-700 dark:text-cyan-300 flex items-center justify-center">
             {uploading ? (
               <Loader2 className="w-7 h-7 animate-spin" aria-hidden="true" />
             ) : (
@@ -290,7 +291,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
           <div className="flex flex-wrap items-center justify-center gap-3">
             <label
               htmlFor="pdf-file-input"
-              className={`cursor-pointer inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold shadow-[0_10px_28px_-10px_rgba(139,92,246,0.75)] transition-all whitespace-nowrap ${
+              className={`cursor-pointer inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-sm font-semibold shadow-[0_10px_28px_-10px_rgba(37,99,235,0.75)] transition-all whitespace-nowrap ${
                 uploading ? "opacity-60 pointer-events-none" : ""
               }`}
             >
@@ -365,7 +366,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
                     isDoneAll || isCompleted
                       ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300"
                       : isCurrent
-                      ? "bg-violet-500/15 border-violet-400/50 text-cyan-700 dark:text-cyan-200"
+                      ? "bg-blue-500/15 border-blue-400/50 text-cyan-700 dark:text-cyan-200"
                       : "bg-[var(--dm-bg-secondary)]/70 border-[var(--dm-border)] text-[var(--dm-text-muted)]"
                   }`}
                 >
@@ -405,7 +406,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Filter by filename..."
                   aria-label="Filter documents by filename"
-                  className="w-full sm:w-56 pl-9 pr-3 py-2 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-xs sm:text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none"
+                  className="w-full sm:w-56 pl-9 pr-3 py-2 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-xs sm:text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-blue-400 focus:outline-none"
                 />
               </div>
 
@@ -425,7 +426,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
                     onClick={() => setStatusFilter(tab.id)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
                       statusFilter === tab.id
-                        ? "bg-violet-500/20 text-[var(--dm-text)] border border-violet-400/30"
+                        ? "bg-blue-500/20 text-[var(--dm-text)] border border-blue-400/30"
                         : "text-[var(--dm-text-muted)] hover:text-[var(--dm-text)]"
                     }`}
                   >
@@ -462,7 +463,9 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
             </div>
           ) : filteredAndSorted.length === 0 ? (
             <div className="dm-card p-10 text-center flex flex-col items-center gap-3">
-              <FileText className="w-8 h-8 text-[var(--dm-text-muted)]" aria-hidden="true" />
+              <div className="w-14 h-14 rounded-2xl bg-blue-500/10 border border-blue-400/25 flex items-center justify-center">
+                <DocuMindMark size="md" />
+              </div>
               <h3 className="font-display text-base font-semibold text-[var(--dm-text)]">
                 {documents.length === 0 ? "Your document library is empty" : "No documents match this filter"}
               </h3>
@@ -485,7 +488,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
                     className={`dm-card p-5 flex flex-col justify-between gap-4 transition-colors ${
                       isFailed
                         ? "border-red-500/35"
-                        : "hover:border-violet-400/35"
+                        : "hover:border-blue-400/35"
                     }`}
                   >
                     <div className="flex items-start justify-between gap-3">
@@ -494,7 +497,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
                           className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
                             isFailed
                               ? "bg-red-500/15 border-red-500/25 text-red-700 dark:text-red-400"
-                              : "bg-violet-500/15 border-violet-400/25 text-violet-700 dark:text-violet-300"
+                              : "bg-blue-500/15 border-blue-400/25 text-blue-700 dark:text-blue-300"
                           }`}
                         >
                           <FileText className="w-5 h-5" aria-hidden="true" />
@@ -551,7 +554,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
                             className={`h-1.5 rounded-full transition-all duration-300 ${
                               isIndexed
                                 ? "bg-gradient-to-r from-emerald-400 to-cyan-400"
-                                : "bg-gradient-to-r from-violet-500 to-cyan-400"
+                                : "bg-gradient-to-r from-blue-500 to-cyan-400"
                             }`}
                             style={{ width: `${doc.progress}%` }}
                           />

@@ -14,7 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { RoutePage, UserPreferences } from "../types";
-import { DocuMindLogo } from "./DocuMindLogo";
+import { DocuMindLogo, DocuMindMark } from "./DocuMindLogo";
 import avatarImg from "../assets/images/avatar_maya_lin_1795494013984.jpg";
 
 interface AppShellProps {
@@ -50,7 +50,7 @@ export const AvatarBadge: React.FC<{ size?: "sm" | "md" | "lg"; name: string }> 
   if (imgFailed) {
     return (
       <div
-        className={`${dim} rounded-full bg-violet-500/20 text-violet-700 dark:text-violet-300 flex items-center justify-center font-display text-xs font-semibold shrink-0 border border-violet-400/30`}
+        className={`${dim} rounded-full bg-blue-500/20 text-blue-700 dark:text-blue-300 flex items-center justify-center font-display text-xs font-semibold shrink-0 border border-blue-400/30`}
         aria-label={name}
       >
         {name
@@ -98,8 +98,8 @@ export const AppShell: React.FC<AppShellProps> = ({
         aria-hidden="true"
         className="pointer-events-none fixed inset-0 overflow-hidden z-0"
       >
-        <div className="absolute -top-40 -left-32 w-[480px] h-[480px] rounded-full bg-violet-600/10 blur-[120px]" />
-        <div className="absolute top-1/3 -right-40 w-[420px] h-[420px] rounded-full bg-cyan-500/8 blur-[120px]" />
+        <div className="absolute -top-40 -left-32 w-[480px] h-[480px] rounded-full bg-blue-600/10 blur-[120px]" />
+        <div className="absolute top-1/3 -right-40 w-[420px] h-[420px] rounded-full bg-cyan-500/10 blur-[120px]" />
       </div>
 
       {/* Mobile backdrop */}
@@ -120,21 +120,29 @@ export const AppShell: React.FC<AppShellProps> = ({
       {/* Collapsible Left Sidebar */}
       <aside
         className={`fixed lg:sticky top-0 inset-y-0 left-0 z-50 h-screen ${
-          collapsed ? "w-[76px]" : "w-64"
+          collapsed ? "w-[84px]" : "w-64"
         } bg-[var(--dm-bg-secondary)]/95 backdrop-blur-xl border-r border-[var(--dm-border)] flex flex-col justify-between transition-[width,transform] duration-200 ease-out ${
           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         } shrink-0`}
       >
         <div className="flex flex-col min-h-0">
           {/* Brand Header */}
-          <div className="h-16 px-4 flex items-center justify-between border-b border-[var(--dm-border)]">
+          <div
+            className={`h-16 ${
+              collapsed ? "px-2.5 justify-between gap-1" : "px-4 justify-between gap-2"
+            } flex items-center border-b border-[var(--dm-border)]`}
+          >
             <button
               type="button"
               onClick={() => handleNav("landing")}
               aria-label="Return to DocuMind home"
-              className="flex items-center overflow-hidden text-left focus-visible:outline-2 focus-visible:outline-violet-400 rounded-lg"
+              className="flex items-center overflow-hidden text-left focus-visible:outline-2 focus-visible:outline-blue-400 rounded-lg"
             >
-              <DocuMindLogo compact={collapsed} animated={false} />
+              <DocuMindLogo
+                compact={collapsed}
+                size={collapsed ? "sm" : "md"}
+                animated={false}
+              />
             </button>
             <button
               type="button"
@@ -183,7 +191,7 @@ export const AppShell: React.FC<AppShellProps> = ({
                     <motion.span
                       layoutId="dm-sidebar-active"
                       transition={{ type: "spring", stiffness: 380, damping: 32 }}
-                      className="absolute inset-0 rounded-xl bg-gradient-to-r from-violet-500/20 to-cyan-500/15 border border-violet-400/35 shadow-[0_0_24px_-8px_rgba(139,92,246,0.5)]"
+                      className="absolute inset-0 rounded-xl bg-gradient-to-r from-blue-500/20 to-cyan-500/15 border border-blue-400/35 shadow-[0_0_24px_-8px_rgba(37,99,235,0.45)]"
                       aria-hidden="true"
                     />
                   )}
@@ -249,6 +257,14 @@ export const AppShell: React.FC<AppShellProps> = ({
               className="lg:hidden inline-flex items-center justify-center w-10 h-10 rounded-xl border border-[var(--dm-border)] text-[var(--dm-text)] hover:bg-slate-900/5 dark:hover:bg-white/5 shrink-0"
             >
               <Menu className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleNav("landing")}
+              aria-label="Return to DocuMind home"
+              className="lg:hidden inline-flex items-center justify-center w-8 h-8 rounded-lg hover:bg-slate-900/5 dark:hover:bg-white/5 shrink-0"
+            >
+              <DocuMindMark size="sm" />
             </button>
             <div className="flex flex-col min-w-0">
               <h1 className="font-display text-base sm:text-lg font-semibold text-[var(--dm-text)] truncate">

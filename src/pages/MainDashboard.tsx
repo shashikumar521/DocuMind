@@ -15,6 +15,7 @@ import { deleteDocumentById, fetchDashboardStats } from "../api";
 import { AnimatedCounter } from "../components/AnimatedCounter";
 import { AppShell, AvatarBadge } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { DocuMindMark } from "../components/DocuMindLogo";
 import { useToast } from "../components/ToastProvider";
 import {
   DashboardStats,
@@ -143,13 +144,13 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search documents..."
               aria-label="Search recent documents"
-              className="w-full pl-9 pr-3 py-2 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none transition-colors"
+              className="w-full pl-9 pr-3 py-2 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-blue-400 focus:outline-none transition-colors"
             />
           </div>
           <button
             type="button"
             onClick={() => onNavigate("documents")}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-xs sm:text-sm font-semibold transition-all whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-xs sm:text-sm font-semibold transition-all whitespace-nowrap shrink-0"
           >
             <Upload className="w-4 h-4" />
             <span className="hidden sm:inline">Upload Document</span>
@@ -159,7 +160,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
             type="button"
             onClick={() => onNavigate("settings")}
             aria-label="Workspace profile and settings"
-            className="hidden sm:inline-flex rounded-full p-0.5 hover:ring-2 hover:ring-violet-400/50 transition-all"
+            className="hidden sm:inline-flex rounded-full p-0.5 hover:ring-2 hover:ring-blue-400/50 transition-all"
           >
             <AvatarBadge size="sm" name={preferences.displayName} />
           </button>
@@ -179,7 +180,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search recent documents..."
             aria-label="Search recent documents"
-            className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none"
+            className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-[var(--dm-surface)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-blue-400 focus:outline-none"
           />
         </div>
 
@@ -204,7 +205,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
               value: stats?.total_documents ?? 0,
               sub: `${stats?.indexed_documents ?? 0} indexed and ready`,
               icon: FileText,
-              tone: "text-violet-700 dark:text-violet-300 bg-violet-500/15 border-violet-400/25",
+              tone: "text-blue-700 dark:text-blue-300 bg-blue-500/15 border-blue-400/25",
             },
             {
               label: "Indexed Pages",
@@ -218,7 +219,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
               value: stats?.total_chunks_indexed ?? 0,
               sub: "Stored vector embeddings",
               icon: Layers,
-              tone: "text-violet-700 dark:text-violet-300 bg-violet-500/15 border-violet-400/25",
+              tone: "text-blue-700 dark:text-blue-300 bg-blue-500/15 border-blue-400/25",
             },
             {
               label: "Successful Queries",
@@ -232,7 +233,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
             return (
               <article
                 key={metric.label}
-                className="dm-card p-5 flex flex-col justify-between gap-4 hover:border-violet-400/30 transition-colors duration-150"
+                className="dm-card p-5 flex flex-col justify-between gap-4 hover:border-blue-400/30 transition-colors duration-150"
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-medium text-[var(--dm-text-muted)]">
@@ -289,8 +290,8 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
               </div>
             ) : filteredDocs.length === 0 ? (
               <div className="p-10 text-center flex flex-col items-center gap-3">
-                <div className="w-12 h-12 rounded-2xl bg-violet-500/15 border border-violet-400/25 text-violet-700 dark:text-violet-300 flex items-center justify-center">
-                  <FileText className="w-5 h-5" aria-hidden="true" />
+                <div className="w-14 h-14 rounded-2xl bg-blue-500/10 border border-blue-400/25 flex items-center justify-center">
+                  <DocuMindMark size="md" />
                 </div>
                 <p className="font-display text-base font-semibold text-[var(--dm-text)]">
                   {searchQuery ? "No matching documents found" : "No documents indexed yet"}
@@ -304,7 +305,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
                   <button
                     type="button"
                     onClick={() => onNavigate("documents")}
-                    className="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 text-white text-sm font-semibold"
+                    className="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all"
                   >
                     <Upload className="w-4 h-4" />
                     <span>Upload First PDF</span>
@@ -333,7 +334,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
                         <td className="py-3.5 px-5">
                           <div className="flex items-center gap-2.5 min-w-0">
                             <FileText
-                              className="w-4 h-4 text-violet-700 dark:text-violet-300 shrink-0"
+                              className="w-4 h-4 text-blue-700 dark:text-blue-300 shrink-0"
                               aria-hidden="true"
                             />
                             <span className="font-medium text-[var(--dm-text)] truncate max-w-[240px]">
@@ -432,7 +433,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
                     key={conv.id}
                     type="button"
                     onClick={() => onNavigate("chat")}
-                    className="text-left p-3.5 rounded-xl bg-[var(--dm-bg-secondary)]/70 border border-[var(--dm-border)] hover:border-violet-400/40 transition-colors flex flex-col gap-1.5"
+                    className="text-left p-3.5 rounded-xl bg-[var(--dm-bg-secondary)]/70 border border-[var(--dm-border)] hover:border-blue-400/40 transition-colors flex flex-col gap-1.5"
                   >
                     <div className="flex items-center justify-between gap-2 text-xs text-[var(--dm-text-muted)]">
                       <span className="truncate font-medium text-[var(--dm-text)]">

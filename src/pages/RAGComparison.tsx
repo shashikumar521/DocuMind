@@ -7,11 +7,11 @@ import {
   Loader2,
   Play,
   ShieldAlert,
-  Sparkles,
   XCircle,
 } from "lucide-react";
 import { compareRagQuestion, fetchHealth } from "../api";
 import { AppShell } from "../components/AppShell";
+import { DocuMindMark } from "../components/DocuMindLogo";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { useToast } from "../components/ToastProvider";
 import { CompareResponse, HealthStatus, RoutePage, UserPreferences } from "../types";
@@ -87,12 +87,12 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
               placeholder="Ask a specific question about your uploaded PDFs to compare Without RAG vs. With RAG..."
-              className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-violet-400 focus:outline-none"
+              className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-blue-400 focus:outline-none"
             />
             <button
               type="submit"
               disabled={loading || !question.trim()}
-              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all disabled:opacity-45 shrink-0 whitespace-nowrap"
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-sm font-semibold transition-all disabled:opacity-45 shrink-0 whitespace-nowrap"
             >
               {loading ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -181,8 +181,8 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
           <article className="dm-card dm-glow-border p-6 flex flex-col gap-5">
             <header className="flex items-center justify-between pb-4 border-b border-[var(--dm-border)]">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500/20 to-cyan-500/20 border border-cyan-400/35 text-cyan-700 dark:text-cyan-300 flex items-center justify-center">
-                  <Sparkles className="w-5 h-5" aria-hidden="true" />
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/15 to-cyan-500/15 border border-cyan-400/35 flex items-center justify-center shrink-0">
+                  <DocuMindMark size="sm" />
                 </div>
                 <div>
                   <h2 className="font-display text-lg font-semibold text-[var(--dm-text)]">
@@ -251,7 +251,7 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
                         >
                           <summary className="cursor-pointer text-xs font-medium text-[var(--dm-text-secondary)] flex items-center justify-between gap-2">
                             <span className="inline-flex items-center gap-1.5 truncate">
-                              <FileText className="w-3.5 h-3.5 text-violet-700 dark:text-violet-300 shrink-0" />
+                              <FileText className="w-3.5 h-3.5 text-blue-700 dark:text-blue-300 shrink-0" />
                               <span className="truncate">
                                 #{idx + 1} {src.filename} · Page {src.page_number}
                               </span>

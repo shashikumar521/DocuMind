@@ -212,18 +212,42 @@ class PostgresBlobStorage implements StorageAdapter {
 
   constructor(databaseUrl: string) {
     const needsSsl =
-      databaseUrl.includes("sslmode=require") ||
+      databaseUrl.includes("sslmode=") ||
       databaseUrl.includes("neon.tech") ||
       databaseUrl.includes("supabase") ||
       databaseUrl.includes("vercel-storage") ||
       isVercelEnvironment();
 
+    let normalizedUrl = databaseUrl;
+    let hasExplicitSslParam = false;
+    try {
+      const parsed = new URL(databaseUrl);
+      const sslmode = parsed.searchParams.get("sslmode")?.toLowerCase();
+      const uselibpqcompat = parsed.searchParams.get("uselibpqcompat")?.toLowerCase();
+      if (sslmode) {
+        hasExplicitSslParam = true;
+        if (
+          uselibpqcompat !== "true" &&
+          (sslmode === "prefer" || sslmode === "require" || sslmode === "verify-ca")
+        ) {
+          parsed.searchParams.set("sslmode", "verify-full");
+          normalizedUrl = parsed.toString();
+        }
+      } else if (needsSsl) {
+        parsed.searchParams.set("sslmode", "verify-full");
+        normalizedUrl = parsed.toString();
+        hasExplicitSslParam = true;
+      }
+    } catch {
+      // Non-URL connection string; keep original string and enforce strict TLS if needsSsl
+    }
+
     this.pool = new Pool({
-      connectionString: databaseUrl,
+      connectionString: normalizedUrl,
       max: 5,
       idleTimeoutMillis: 20_000,
       connectionTimeoutMillis: 10_000,
-      ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+      ssl: needsSsl && !hasExplicitSslParam ? { rejectUnauthorized: true } : undefined,
     });
   }
 
@@ -802,7 +826,7 @@ class LocalDevJsonStorage implements StorageAdapter {
       storage_mode: "local-dev",
       vector_store: "local-dev-json",
       object_storage: "local-dev-fs",
-      storage_label: "Local Dev Store (set DATABASE_URL & BLOB_READ_WRITE_TOKEN for production)",
+      storage_label: "Local Dev Store (set DATABASE_URL & BLOB_STORE_ID for production)",
     };
   }
 

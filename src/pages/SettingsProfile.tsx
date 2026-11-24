@@ -3,6 +3,7 @@ import { Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import { clearChatHistoryApi } from "../api";
 import { AppShell, AvatarBadge } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { DocuMindLogo } from "../components/DocuMindLogo";
 import { useToast } from "../components/ToastProvider";
 import { RoutePage, ThemeMode, UserPreferences } from "../types";
 
@@ -50,16 +51,19 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
       <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-4xl w-full mx-auto flex flex-col gap-6">
         {/* Profile */}
         <section className="dm-card p-6 flex flex-col gap-5">
-          <div className="flex flex-col sm:flex-row sm:items-center gap-4 pb-5 border-b border-[var(--dm-border)]">
-            <AvatarBadge size="lg" name={preferences.displayName} />
-            <div className="min-w-0">
-              <h2 className="font-display text-lg font-semibold text-[var(--dm-text)] truncate">
-                {preferences.displayName}
-              </h2>
-              <p className="text-sm text-[var(--dm-text-muted)] truncate">
-                {preferences.email} · Document Intelligence Workspace
-              </p>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-[var(--dm-border)]">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-4 min-w-0">
+              <AvatarBadge size="lg" name={preferences.displayName} />
+              <div className="min-w-0">
+                <h2 className="font-display text-lg font-semibold text-[var(--dm-text)] truncate">
+                  {preferences.displayName}
+                </h2>
+                <p className="text-sm text-[var(--dm-text-muted)] truncate">
+                  {preferences.email} · Document Intelligence Workspace
+                </p>
+              </div>
             </div>
+            <DocuMindLogo size="sm" animated={false} className="self-start sm:self-center" />
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -73,7 +77,7 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
                 onChange={(e) =>
                   onUpdatePreferences({ ...preferences, displayName: e.target.value })
                 }
-                className="px-3.5 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] focus:border-violet-400 focus:outline-none"
+                className="px-3.5 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] focus:border-blue-400 focus:outline-none"
               />
             </label>
             <label className="flex flex-col gap-1.5">
@@ -84,7 +88,7 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
                 type="email"
                 value={preferences.email}
                 onChange={(e) => onUpdatePreferences({ ...preferences, email: e.target.value })}
-                className="px-3.5 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] focus:border-violet-400 focus:outline-none"
+                className="px-3.5 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] focus:border-blue-400 focus:outline-none"
               />
             </label>
           </div>
@@ -112,7 +116,7 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
                   onClick={() => onUpdatePreferences({ ...preferences, theme: opt.value })}
                   className={`flex items-center gap-3 p-4 rounded-xl border text-left transition-all ${
                     selected
-                      ? "bg-violet-500/15 border-violet-400/55 text-[var(--dm-text)]"
+                      ? "bg-blue-500/15 border-blue-400/55 text-[var(--dm-text)]"
                       : "bg-[var(--dm-bg-secondary)]/70 border-[var(--dm-border)] text-[var(--dm-text-muted)] hover:text-[var(--dm-text)]"
                   }`}
                 >
@@ -146,7 +150,7 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
                 onChange={(e) =>
                   onUpdatePreferences({ ...preferences, autoIndex: e.target.checked })
                 }
-                className="w-4 h-4 rounded accent-violet-500"
+                className="w-4 h-4 rounded accent-blue-500"
               />
             </label>
 
@@ -165,7 +169,7 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
                 onChange={(e) =>
                   onUpdatePreferences({ ...preferences, includeCitations: e.target.checked })
                 }
-                className="w-4 h-4 rounded accent-violet-500"
+                className="w-4 h-4 rounded accent-blue-500"
               />
             </label>
 
@@ -183,7 +187,7 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
                 onChange={(e) =>
                   onUpdatePreferences({ ...preferences, topK: Number(e.target.value) })
                 }
-                className="px-3.5 py-2 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] focus:border-violet-400 focus:outline-none"
+                className="px-3.5 py-2 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] focus:border-blue-400 focus:outline-none"
               >
                 <option value={3} className="bg-[var(--dm-surface)] text-[var(--dm-text)]">Top 3 chunks</option>
                 <option value={5} className="bg-[var(--dm-surface)] text-[var(--dm-text)]">Top 5 chunks</option>

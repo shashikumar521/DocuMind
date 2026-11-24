@@ -267,14 +267,23 @@ export function createApiApp(): Express {
         : 5;
 
     try {
+      const withoutRagPromise = generateWithoutRagAnswer(question).then(
+        (answer) => ({ ok: true as const, answer }),
+        (err: unknown) => ({ ok: false as const, err })
+      );
       const chunks = await ragEngine.retrieveChunks(question, topK, documentIds);
-      const withoutRag = await generateWithoutRagAnswer(question);
-      const withRagResult = await generateRagAnswer(question, chunks);
+      const [withoutRagRes, withRagResult] = await Promise.all([
+        withoutRagPromise,
+        generateRagAnswer(question, chunks),
+      ]);
+      if (!withoutRagRes.ok) {
+        throw withoutRagRes.err;
+      }
       res.json({
         question,
         model: getGeminiChatModel(),
         without_rag: {
-          answer: withoutRag,
+          answer: withoutRagRes.answer,
         },
         with_rag: {
           answer: withRagResult.answer,

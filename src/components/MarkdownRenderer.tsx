@@ -30,7 +30,7 @@ function renderInlineSegments(
       parts.push(
         <code
           key={`code-${keyIdx++}`}
-          className="px-1.5 py-0.5 rounded-md bg-violet-500/15 border border-violet-400/20 font-mono text-[12px] text-cyan-700 dark:text-cyan-300"
+          className="px-1.5 py-0.5 rounded-md bg-blue-500/15 border border-blue-400/20 font-mono text-[12px] text-cyan-700 dark:text-cyan-300"
         >
           {token.slice(1, -1)}
         </code>
@@ -77,7 +77,7 @@ function renderInlineSegments(
           parts.push(
             <span
               key={`cite-static-${keyIdx++}`}
-              className="inline-flex items-center gap-1 mx-0.5 px-1.5 py-0.5 rounded-md bg-violet-500/15 border border-violet-400/25 font-mono text-[11px] text-violet-700 dark:text-violet-300 align-baseline"
+              className="inline-flex items-center gap-1 mx-0.5 px-1.5 py-0.5 rounded-md bg-blue-500/15 border border-blue-400/25 font-mono text-[11px] text-blue-700 dark:text-blue-300 align-baseline"
             >
               {citeFile} · p.{citePage}
             </span>
@@ -190,7 +190,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
         i++;
       }
       blocks.push(
-        <ul key={`ul-${blocks.length}`} className="my-1.5 space-y-1.5 pl-4 list-disc marker:text-violet-400">
+        <ul key={`ul-${blocks.length}`} className="my-1.5 space-y-1.5 pl-4 list-disc marker:text-blue-400">
           {items.map((item, idx) => (
             <li key={idx} className="text-sm text-[var(--dm-text-secondary)] leading-relaxed">
               {renderInlineSegments(item, sources, onSelectCitation)}

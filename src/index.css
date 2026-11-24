@@ -17,12 +17,12 @@
   --dm-surface-elevated: #f8fafc;
   --dm-surface-glass: rgba(255, 255, 255, 0.82);
   --dm-border: rgba(15, 23, 42, 0.1);
-  --dm-border-strong: rgba(109, 40, 217, 0.28);
+  --dm-border-strong: rgba(37, 99, 235, 0.32);
   --dm-text: #0f172a;
   --dm-text-secondary: #475569;
   --dm-text-muted: #64748b;
-  --dm-violet: #7c3aed;
-  --dm-violet-soft: rgba(124, 58, 237, 0.12);
+  --dm-blue: #2563eb;
+  --dm-blue-soft: rgba(37, 99, 235, 0.12);
   --dm-cyan: #0891b2;
   --dm-cyan-soft: rgba(8, 145, 178, 0.12);
   --dm-success: #059669;
@@ -40,12 +40,12 @@
   --dm-surface-elevated: #172136;
   --dm-surface-glass: rgba(13, 18, 34, 0.78);
   --dm-border: rgba(148, 163, 184, 0.14);
-  --dm-border-strong: rgba(139, 92, 246, 0.42);
+  --dm-border-strong: rgba(56, 189, 248, 0.42);
   --dm-text: #f8fafc;
   --dm-text-secondary: #cbd5e1;
   --dm-text-muted: #94a3b8;
-  --dm-violet: #8b5cf6;
-  --dm-violet-soft: rgba(139, 92, 246, 0.16);
+  --dm-blue: #3b82f6;
+  --dm-blue-soft: rgba(59, 130, 246, 0.16);
   --dm-cyan: #22d3ee;
   --dm-cyan-soft: rgba(34, 211, 238, 0.14);
   --dm-success: #34d399;
@@ -83,7 +83,7 @@ body {
 
 .dm-glow-border {
   border: 1px solid var(--dm-border-strong);
-  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.12), 0 12px 32px -12px rgba(8, 11, 22, 0.45);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.14), 0 12px 32px -12px rgba(8, 11, 22, 0.45);
 }
 
 @keyframes dm-float {
