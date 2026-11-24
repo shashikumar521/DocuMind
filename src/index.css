@@ -1,0 +1,201 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Semantic Status Colors */
+  --color-success: #15803D;
+  --color-on-success: #FFFFFF;
+  --color-success-container: #DCFCE7;
+  --color-on-success-container: #14532D;
+  --color-warning: #B45309;
+  --color-on-warning: #FFFFFF;
+  --color-warning-container: #FEF3C7;
+  --color-on-warning-container: #78350F;
+
+  /* Light Theme Tokens (Stitch DocuMind Design System) */
+  --color-light-primary: #004AC6;
+  --color-light-on-primary: #FFFFFF;
+  --color-light-primary-container: #2563EB;
+  --color-light-on-primary-container: #EEEFFF;
+  --color-light-secondary: #712AE2;
+  --color-light-on-secondary: #FFFFFF;
+  --color-light-secondary-container: #8A4CFC;
+  --color-light-on-secondary-container: #FFFBFF;
+  --color-light-tertiary: #943700;
+  --color-light-on-tertiary: #FFFFFF;
+  --color-light-tertiary-container: #BC4800;
+  --color-light-on-tertiary-container: #FFEDE6;
+  --color-light-error: #BA1A1A;
+  --color-light-on-error: #FFFFFF;
+  --color-light-error-container: #FFDAD6;
+  --color-light-on-error-container: #93000A;
+  --color-light-background: #FAF8FF;
+  --color-light-on-background: #191B23;
+  --color-light-surface: #FAF8FF;
+  --color-light-surface-dim: #D9D9E5;
+  --color-light-surface-bright: #FAF8FF;
+  --color-light-surface-container-lowest: #FFFFFF;
+  --color-light-surface-container-low: #F3F3FE;
+  --color-light-surface-container: #EDEDF9;
+  --color-light-surface-container-high: #E7E7F3;
+  --color-light-surface-container-highest: #E1E2ED;
+  --color-light-on-surface: #191B23;
+  --color-light-surface-variant: #DFE1F4;
+  --color-light-on-surface-variant: #434655;
+  --color-light-outline: #737686;
+  --color-light-outline-variant: #C3C6D7;
+  --color-light-inverse-surface: #2E3039;
+  --color-light-inverse-on-surface: #F0F0FB;
+  --color-light-inverse-primary: #B4C5FF;
+  --color-light-shadow: #000000;
+  --color-light-scrim: #000000;
+
+  /* Dark Theme Tokens */
+  --color-dark-primary: #B4C5FF;
+  --color-dark-on-primary: #002A78;
+  --color-dark-primary-container: #2563EB;
+  --color-dark-on-primary-container: #EEEFFF;
+  --color-dark-secondary: #D2BBFF;
+  --color-dark-on-secondary: #3F008E;
+  --color-dark-secondary-container: #6001D1;
+  --color-dark-on-secondary-container: #C9AEFF;
+  --color-dark-tertiary: #FFB596;
+  --color-dark-on-tertiary: #581E00;
+  --color-dark-tertiary-container: #BC4800;
+  --color-dark-on-tertiary-container: #FFEDE6;
+  --color-dark-error: #FFB4AB;
+  --color-dark-on-error: #690005;
+  --color-dark-error-container: #93000A;
+  --color-dark-on-error-container: #FFDAD6;
+  --color-dark-background: #11131B;
+  --color-dark-on-background: #E1E2ED;
+  --color-dark-surface: #11131B;
+  --color-dark-surface-dim: #11131B;
+  --color-dark-surface-bright: #373942;
+  --color-dark-surface-container-lowest: #0C0E16;
+  --color-dark-surface-container-low: #191B23;
+  --color-dark-surface-container: #1D1F27;
+  --color-dark-surface-container-high: #282A32;
+  --color-dark-surface-container-highest: #32343D;
+  --color-dark-on-surface: #E1E2ED;
+  --color-dark-surface-variant: #434655;
+  --color-dark-on-surface-variant: #C3C6D7;
+  --color-dark-outline: #8D90A0;
+  --color-dark-outline-variant: #434655;
+  --color-dark-inverse-surface: #E1E2ED;
+  --color-dark-inverse-on-surface: #2E3039;
+  --color-dark-inverse-primary: #0053DB;
+  --color-dark-shadow: #000000;
+  --color-dark-scrim: #000000;
+
+  /* Spacing */
+  --spacing-gutter-xs: 4px;
+  --spacing-gutter-sm: 8px;
+  --spacing-gutter-md: 16px;
+  --spacing-gutter-lg: 24px;
+  --spacing-gutter-xl: 32px;
+  --spacing-section: 48px;
+  --spacing-page-margin: 24px;
+
+  /* Fonts */
+  --font-display: "Inter", sans-serif;
+  --font-headline: "Inter", sans-serif;
+  --font-title: "Inter", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-label: "Inter", sans-serif;
+  --font-mono: "Source Code Pro", monospace;
+
+  /* Typography Scale */
+  --text-display-lg: 48px;
+  --text-display-lg--line-height: 56px;
+  --text-display-lg--letter-spacing: -0.75px;
+  --text-display-lg--font-weight: 700;
+
+  --text-display-lg-mobile: 32px;
+  --text-display-lg-mobile--line-height: 38px;
+  --text-display-lg-mobile--letter-spacing: -0.5px;
+  --text-display-lg-mobile--font-weight: 700;
+
+  --text-headline-lg: 32px;
+  --text-headline-lg--line-height: 40px;
+  --text-headline-lg--letter-spacing: -0.4px;
+  --text-headline-lg--font-weight: 700;
+
+  --text-headline-lg-mobile: 24px;
+  --text-headline-lg-mobile--line-height: 32px;
+  --text-headline-lg-mobile--letter-spacing: -0.25px;
+  --text-headline-lg-mobile--font-weight: 700;
+
+  --text-headline-md: 24px;
+  --text-headline-md--line-height: 32px;
+  --text-headline-md--letter-spacing: -0.25px;
+  --text-headline-md--font-weight: 600;
+
+  --text-headline-sm: 20px;
+  --text-headline-sm--line-height: 28px;
+  --text-headline-sm--letter-spacing: -0.15px;
+  --text-headline-sm--font-weight: 600;
+
+  --text-title-lg: 18px;
+  --text-title-lg--line-height: 26px;
+  --text-title-lg--font-weight: 600;
+
+  --text-title-md: 16px;
+  --text-title-md--line-height: 24px;
+  --text-title-md--font-weight: 600;
+
+  --text-title-sm: 14px;
+  --text-title-sm--line-height: 20px;
+  --text-title-sm--font-weight: 600;
+
+  --text-body-lg: 16px;
+  --text-body-lg--line-height: 26px;
+  --text-body-lg--font-weight: 400;
+
+  --text-body-md: 14px;
+  --text-body-md--line-height: 22px;
+  --text-body-md--font-weight: 400;
+
+  --text-body-sm: 13px;
+  --text-body-sm--line-height: 20px;
+  --text-body-sm--font-weight: 400;
+
+  --text-label-lg: 14px;
+  --text-label-lg--line-height: 20px;
+  --text-label-lg--font-weight: 500;
+
+  --text-label-md: 12px;
+  --text-label-md--line-height: 16px;
+  --text-label-md--letter-spacing: 0.1px;
+  --text-label-md--font-weight: 500;
+
+  --text-label-sm: 11px;
+  --text-label-sm--line-height: 16px;
+  --text-label-sm--letter-spacing: 0.2px;
+  --text-label-sm--font-weight: 600;
+
+  --text-mono-md: 13px;
+  --text-mono-md--line-height: 20px;
+  --text-mono-md--font-weight: 500;
+
+  --text-mono-sm: 12px;
+  --text-mono-sm--line-height: 16px;
+  --text-mono-sm--font-weight: 500;
+
+  /* Transition Timing */
+  --transition-duration-state-change: 120ms;
+  --transition-duration-surface-enter: 220ms;
+  --transition-duration-surface-exit: 150ms;
+}
+
+.material-symbols-outlined {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  line-height: 1 !important;
+  box-sizing: content-box;
+  overflow: hidden;
+  white-space: nowrap;
+  direction: ltr;
+  vertical-align: middle;
+}

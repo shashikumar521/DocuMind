@@ -1,0 +1,438 @@
+<!DOCTYPE html><html lang="en"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Search &amp; Retrieval — DocuMind</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script id="tailwind-config">/** @type {import('tailwindcss').Config} */
+globalThis.tailwind = globalThis.tailwind || {};
+globalThis.tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        'success': '#15803D',
+        'on-success': '#FFFFFF',
+        'success-container': '#DCFCE7',
+        'on-success-container': '#14532D',
+        'warning': '#B45309',
+        'on-warning': '#FFFFFF',
+        'warning-container': '#FEF3C7',
+        'on-warning-container': '#78350F',
+        'light-primary': '#004AC6',
+        'light-on-primary': '#FFFFFF',
+        'light-primary-container': '#2563EB',
+        'light-on-primary-container': '#EEEFFF',
+        'light-secondary': '#712AE2',
+        'light-on-secondary': '#FFFFFF',
+        'light-secondary-container': '#8A4CFC',
+        'light-on-secondary-container': '#FFFBFF',
+        'light-tertiary': '#943700',
+        'light-on-tertiary': '#FFFFFF',
+        'light-tertiary-container': '#BC4800',
+        'light-on-tertiary-container': '#FFEDE6',
+        'light-error': '#BA1A1A',
+        'light-on-error': '#FFFFFF',
+        'light-error-container': '#FFDAD6',
+        'light-on-error-container': '#93000A',
+        'light-background': '#FAF8FF',
+        'light-on-background': '#191B23',
+        'light-surface': '#FAF8FF',
+        'light-surface-dim': '#D9D9E5',
+        'light-surface-bright': '#FAF8FF',
+        'light-surface-container-lowest': '#FFFFFF',
+        'light-surface-container-low': '#F3F3FE',
+        'light-surface-container': '#EDEDF9',
+        'light-surface-container-high': '#E7E7F3',
+        'light-surface-container-highest': '#E1E2ED',
+        'light-on-surface': '#191B23',
+        'light-surface-variant': '#DFE1F4',
+        'light-on-surface-variant': '#434655',
+        'light-outline': '#737686',
+        'light-outline-variant': '#C3C6D7',
+        'light-inverse-surface': '#2E3039',
+        'light-inverse-on-surface': '#F0F0FB',
+        'light-inverse-primary': '#B4C5FF',
+        'light-shadow': '#000000',
+        'light-scrim': '#000000',
+        'dark-primary': '#B4C5FF',
+        'dark-on-primary': '#002A78',
+        'dark-primary-container': '#2563EB',
+        'dark-on-primary-container': '#EEEFFF',
+        'dark-secondary': '#D2BBFF',
+        'dark-on-secondary': '#3F008E',
+        'dark-secondary-container': '#6001D1',
+        'dark-on-secondary-container': '#C9AEFF',
+        'dark-tertiary': '#FFB596',
+        'dark-on-tertiary': '#581E00',
+        'dark-tertiary-container': '#BC4800',
+        'dark-on-tertiary-container': '#FFEDE6',
+        'dark-error': '#FFB4AB',
+        'dark-on-error': '#690005',
+        'dark-error-container': '#93000A',
+        'dark-on-error-container': '#FFDAD6',
+        'dark-background': '#11131B',
+        'dark-on-background': '#E1E2ED',
+        'dark-surface': '#11131B',
+        'dark-surface-dim': '#11131B',
+        'dark-surface-bright': '#373942',
+        'dark-surface-container-lowest': '#0C0E16',
+        'dark-surface-container-low': '#191B23',
+        'dark-surface-container': '#1D1F27',
+        'dark-surface-container-high': '#282A32',
+        'dark-surface-container-highest': '#32343D',
+        'dark-on-surface': '#E1E2ED',
+        'dark-surface-variant': '#434655',
+        'dark-on-surface-variant': '#C3C6D7',
+        'dark-outline': '#8D90A0',
+        'dark-outline-variant': '#434655',
+        'dark-inverse-surface': '#E1E2ED',
+        'dark-inverse-on-surface': '#2E3039',
+        'dark-inverse-primary': '#0053DB',
+        'dark-shadow': '#000000',
+        'dark-scrim': '#000000',
+      },
+      borderRadius: {
+        'sm': '6px',
+        'DEFAULT': '8px',
+        'md': '12px',
+        'lg': '16px',
+        'xl': '24px',
+        'full': '9999px',
+      },
+      spacing: {
+        'gutter-xs': '4px',
+        'gutter-sm': '8px',
+        'gutter-md': '16px',
+        'gutter-lg': '24px',
+        'gutter-xl': '32px',
+        'section': '48px',
+        'page-margin': '24px',
+      },
+      fontFamily: {
+        'display': ['"Inter"', 'sans-serif'],
+        'headline': ['"Inter"', 'sans-serif'],
+        'title': ['"Inter"', 'sans-serif'],
+        'body': ['"Inter"', 'sans-serif'],
+        'label': ['"Inter"', 'sans-serif'],
+        'mono': ['"Source Code Pro"', 'monospace'],
+      },
+      fontSize: {
+        'display-lg': ['48px', { lineHeight: '56px', letterSpacing: '-0.75px', fontWeight: '700' }],
+        'display-lg-mobile': ['32px', { lineHeight: '38px', letterSpacing: '-0.5px', fontWeight: '700' }],
+        'headline-lg': ['32px', { lineHeight: '40px', letterSpacing: '-0.4px', fontWeight: '700' }],
+        'headline-lg-mobile': ['24px', { lineHeight: '32px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-md': ['24px', { lineHeight: '32px', letterSpacing: '-0.25px', fontWeight: '600' }],
+        'headline-sm': ['20px', { lineHeight: '28px', letterSpacing: '-0.15px', fontWeight: '600' }],
+        'title-lg': ['18px', { lineHeight: '26px', letterSpacing: '0px', fontWeight: '600' }],
+        'title-md': ['16px', { lineHeight: '24px', letterSpacing: '0px', fontWeight: '600' }],
+        'title-sm': ['14px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '600' }],
+        'body-lg': ['16px', { lineHeight: '26px', letterSpacing: '0px', fontWeight: '400' }],
+        'body-md': ['14px', { lineHeight: '22px', letterSpacing: '0px', fontWeight: '400' }],
+        'body-sm': ['13px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '400' }],
+        'label-lg': ['14px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '500' }],
+        'label-md': ['12px', { lineHeight: '16px', letterSpacing: '0.1px', fontWeight: '500' }],
+        'label-sm': ['11px', { lineHeight: '16px', letterSpacing: '0.2px', fontWeight: '600' }],
+        'mono-md': ['13px', { lineHeight: '20px', letterSpacing: '0px', fontWeight: '500' }],
+        'mono-sm': ['12px', { lineHeight: '16px', letterSpacing: '0px', fontWeight: '500' }],
+      },
+      transitionDuration: {
+        'state-change': '120ms',
+        'surface-enter': '220ms',
+        'surface-exit': '150ms',
+      },
+      transitionDelay: {
+        'state-change': '0ms',
+        'surface-enter': '0ms',
+        'surface-exit': '0ms',
+      },
+      transitionTimingFunction: {
+        'state-change': 'ease-out',
+        'surface-enter': 'cubic-bezier(0.2, 0, 0, 1)',
+        'surface-exit': 'cubic-bezier(0.3, 0, 1, 1)',
+      },
+    },
+  },
+};
+if (typeof module !== 'undefined') module.exports = globalThis.tailwind.config;
+</script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Source+Code+Pro:wght@400;500;600&amp;display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=block" rel="stylesheet">
+  <style>.material-symbols-outlined, .material-symbols-rounded, .material-symbols-sharp, .material-icons { display: inline-block; width: 1em; height: 1em; line-height: 1 !important; box-sizing: content-box; overflow: hidden; white-space: nowrap; direction: ltr; vertical-align: middle; }</style>
+</head>
+<body class="bg-light-surface text-light-on-surface font-body antialiased">
+  <div class="min-h-[1024px] flex bg-light-surface" data-stitch-vh="min-h-[1024px]===min-h-screen">
+    <div id="sidebar-backdrop" class="hidden fixed inset-0 z-40 bg-light-scrim/40 lg:hidden"></div>
+
+    <!-- Collapsible Left Sidebar -->
+    <aside id="app-sidebar" class="fixed lg:static inset-y-0 left-0 z-50 w-64 min-h-[1024px] bg-light-surface-container-low border-r border-light-outline-variant/60 flex flex-col justify-between transition-transform duration-surface-enter -translate-x-full lg:translate-x-0 shrink-0" data-stitch-vh="min-h-[1024px]===min-h-screen">
+      <div class="flex flex-col">
+        <div class="h-16 px-gutter-md flex items-center justify-between border-b border-light-outline-variant/50">
+          <a href="../landing-page/LandingPage.html" class="flex items-center gap-gutter-sm overflow-hidden">
+            <div class="w-8 h-8 rounded-md bg-gradient-to-br from-light-primary to-light-secondary flex items-center justify-center text-light-on-primary shrink-0 shadow-sm">
+              <span class="material-symbols-outlined text-[18px]" aria-hidden="true">psychology</span>
+            </div>
+            <span class="sidebar-label font-headline text-title-md text-light-on-surface whitespace-nowrap">DocuMind</span>
+          </a>
+          <button id="sidebar-collapse-btn" type="button" aria-label="Collapse sidebar" class="hidden lg:inline-flex items-center justify-center w-8 h-8 rounded text-light-on-surface-variant hover:bg-light-surface-container">
+            <span class="material-symbols-outlined text-[18px]">dock_to_left</span>
+          </button>
+          <button id="sidebar-close-mobile" type="button" aria-label="Close sidebar" class="lg:hidden inline-flex items-center justify-center w-8 h-8 rounded text-light-on-surface-variant hover:bg-light-surface-container">
+            <span class="material-symbols-outlined text-[20px]">close</span>
+          </button>
+        </div>
+
+        <nav aria-label="Sidebar Navigation" class="p-gutter-sm flex flex-col gap-gutter-xs">
+          <a href="../main-dashboard/MainDashboard.html" class="flex items-center gap-gutter-sm px-3 py-2.5 rounded text-light-on-surface-variant hover:bg-light-surface-container hover:text-light-on-surface font-label text-label-lg transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">dashboard</span>
+            <span class="sidebar-label">Dashboard</span>
+          </a>
+          <a href="../document-upload/DocumentUpload.html" class="flex items-center gap-gutter-sm px-3 py-2.5 rounded text-light-on-surface-variant hover:bg-light-surface-container hover:text-light-on-surface font-label text-label-lg transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">folder_open</span>
+            <span class="sidebar-label">My Documents</span>
+          </a>
+          <a href="../ai-document-chat/AIDocumentChat.html" class="flex items-center gap-gutter-sm px-3 py-2.5 rounded text-light-on-surface-variant hover:bg-light-surface-container hover:text-light-on-surface font-label text-label-lg transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">chat</span>
+            <span class="sidebar-label">AI Chat</span>
+          </a>
+          <a href="../retrieval-sources/RetrievalSources.html" aria-current="page" class="flex items-center gap-gutter-sm px-3 py-2.5 rounded bg-light-primary text-light-on-primary font-label text-label-lg shadow-sm">
+            <span class="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">manage_search</span>
+            <span class="sidebar-label">Search &amp; Retrieval</span>
+          </a>
+          <a href="../rag-comparison/RAGComparison.html" class="flex items-center gap-gutter-sm px-3 py-2.5 rounded text-light-on-surface-variant hover:bg-light-surface-container hover:text-light-on-surface font-label text-label-lg transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">compare</span>
+            <span class="sidebar-label">RAG Comparison</span>
+          </a>
+          <a href="../settings-profile/SettingsProfile.html" class="flex items-center gap-gutter-sm px-3 py-2.5 rounded text-light-on-surface-variant hover:bg-light-surface-container hover:text-light-on-surface font-label text-label-lg transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">settings</span>
+            <span class="sidebar-label">Settings</span>
+          </a>
+          <a href="../landing-page/LandingPage.html#how-it-works" class="flex items-center gap-gutter-sm px-3 py-2.5 rounded text-light-on-surface-variant hover:bg-light-surface-container hover:text-light-on-surface font-label text-label-lg transition-colors duration-state-change">
+            <span class="material-symbols-outlined text-[20px] shrink-0" aria-hidden="true">help</span>
+            <span class="sidebar-label">Help &amp; Support</span>
+          </a>
+        </nav>
+      </div>
+
+      <div class="p-gutter-sm border-t border-light-outline-variant/50">
+        <a href="../settings-profile/SettingsProfile.html" class="flex items-center gap-gutter-sm p-gutter-sm rounded hover:bg-light-surface-container transition-colors duration-state-change">
+          <img src="https://lh3.googleusercontent.com/aida/ALJJyrB62EMtt0k3Eefl3eaKzVWlVYS6DTa1r14Megenqt7PSDCxGta13m19N_oKX6gUrObPbWEisXqLLZ6m39NYPr92RVFnd-b6c7vL5gtmrDm3CzFc-sOd4BAf-VOudSJm6KTosMDeO_Vsr3B0D0_DPDgkiGIAeQ1hNiA-W5Yvyu0JjkpYnH8tekUGX8MCmilpqRDgJqZrVbDOTH9zTwEicVpmfuVMLtAjwKMyLj6d5zuGNXTgc4MhHxEkyOdR" alt="Dr. Maya Lin" class="w-9 h-9 rounded-full object-cover shrink-0 border border-light-outline-variant/60">
+          <div class="sidebar-label flex flex-col min-w-0">
+            <span class="font-title text-title-sm text-light-on-surface truncate">Dr. Maya Lin</span>
+            <span class="font-body text-body-sm text-light-on-surface-variant truncate">Research Workspace</span>
+          </div>
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <div class="flex-1 flex flex-col min-w-0">
+      <header class="sticky top-0 z-30 h-16 bg-light-surface-container-lowest border-b border-light-outline-variant/60 px-gutter-md lg:px-gutter-lg flex items-center justify-between gap-gutter-md">
+        <div class="flex items-center gap-gutter-sm min-w-0">
+          <button id="sidebar-open-mobile" type="button" aria-label="Open navigation menu" class="lg:hidden inline-flex items-center justify-center w-9 h-9 rounded text-light-on-surface hover:bg-light-surface-container">
+            <span class="material-symbols-outlined text-[22px]">menu</span>
+          </button>
+          <div class="flex flex-col min-w-0">
+            <h1 class="font-headline text-title-lg text-light-on-surface truncate">Retrieval &amp; Source References</h1>
+            <p class="hidden sm:block font-body text-body-sm text-light-on-surface-variant truncate">Inspect the end-to-end RAG pipeline from query embedding to ChromaDB top-5 chunks.</p>
+          </div>
+        </div>
+        <span class="px-2.5 py-1 rounded-full bg-light-surface-container text-light-secondary font-label text-label-sm shrink-0">ChromaDB Integration Ready</span>
+      </header>
+
+      <main class="flex-1 p-gutter-md lg:p-gutter-lg max-w-7xl w-full mx-auto flex flex-col gap-gutter-lg" data-api-endpoint="/api/retrieval/inspect">
+        <!-- Pipeline Flow Stepper -->
+        <section aria-label="RAG Pipeline Stages" class="bg-light-surface-container-lowest border border-light-outline-variant/60 rounded-md p-gutter-lg shadow-sm">
+          <div class="flex items-center justify-between mb-gutter-md flex-wrap gap-gutter-sm">
+            <h2 class="font-headline text-headline-sm text-light-on-surface">RAG Retrieval Pipeline</h2>
+            <span class="font-mono text-mono-sm text-light-on-surface-variant">Sentence Transformers + ChromaDB + Gemini</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-gutter-sm">
+            <div class="p-gutter-sm rounded bg-light-surface-container-low border border-light-primary/40 flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-light-primary">1. User Question</span>
+              <span class="font-body text-body-sm text-light-on-surface">Raw query text</span>
+            </div>
+            <div class="p-gutter-sm rounded bg-light-surface-container-low border border-light-outline-variant/60 flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-light-secondary">2. Query Embedding</span>
+              <span class="font-mono text-mono-sm text-light-on-surface-variant">384-dim vector</span>
+            </div>
+            <div class="p-gutter-sm rounded bg-light-surface-container-low border border-light-outline-variant/60 flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-light-primary">3. Semantic Search</span>
+              <span class="font-body text-body-sm text-light-on-surface-variant">Cosine similarity</span>
+            </div>
+            <div class="p-gutter-sm rounded bg-light-surface-container-low border border-light-secondary/40 flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-light-secondary">4. Top 5 Chunks</span>
+              <span class="font-body text-body-sm text-light-on-surface">Ranked passages</span>
+            </div>
+            <div class="p-gutter-sm rounded bg-light-surface-container-low border border-light-outline-variant/60 flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-light-primary">5. Context to Gemini</span>
+              <span class="font-body text-body-sm text-light-on-surface-variant">Grounded prompt</span>
+            </div>
+            <div class="p-gutter-sm rounded bg-light-surface-container-low border border-light-primary/40 flex flex-col gap-gutter-xs">
+              <span class="font-label text-label-sm text-light-primary">6. Generated Answer</span>
+              <span class="font-body text-body-sm text-light-on-surface">Cited synthesis</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Two-Column Distinction: Retrieved Context (Left) vs. Context Sent to Gemini & Generated Answer (Right) -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-gutter-lg items-start">
+          <!-- Top 5 Retrieved Chunks -->
+          <section class="lg:col-span-7 flex flex-col gap-gutter-md">
+            <div class="flex items-center justify-between">
+              <div>
+                <h2 class="font-headline text-headline-sm text-light-on-surface">Top 5 Retrieved Chunks</h2>
+                <p class="font-body text-body-sm text-light-on-surface-variant">Dynamic slots populated from ChromaDB vector search results.</p>
+              </div>
+              <span class="px-2.5 py-1 rounded-full bg-light-surface-container text-light-on-surface-variant font-label text-label-sm">Awaiting Live Query</span>
+            </div>
+
+            <div class="flex flex-col gap-gutter-sm">
+              <!-- Chunk 1 -->
+              <article class="bg-light-surface-container-lowest border border-light-outline-variant/60 rounded-md p-gutter-md shadow-sm flex flex-col gap-gutter-xs">
+                <div class="flex flex-wrap items-center justify-between gap-gutter-sm">
+                  <div class="flex items-center gap-gutter-sm">
+                    <span class="px-2 py-0.5 rounded bg-light-surface-container text-light-primary font-mono text-mono-sm">Rank #1</span>
+                    <span class="font-title text-title-sm text-light-on-surface">Retrieval_Augmented_Generation_Survey.pdf</span>
+                  </div>
+                  <div class="flex items-center gap-gutter-sm font-mono text-mono-sm">
+                    <span class="text-light-on-surface-variant">Page: —</span>
+                    <span class="text-light-on-surface-variant">ID: chunk_—</span>
+                    <span class="px-2 py-0.5 rounded-full bg-light-surface-container text-light-secondary">Score: —</span>
+                  </div>
+                </div>
+                <p class="font-body text-body-sm text-light-on-surface-variant bg-light-surface-container-low/60 p-gutter-sm rounded border border-light-outline-variant/40">
+                  [Dynamic ChromaDB chunk text preview will render here when a live query is executed against the FastAPI `/api/retrieval/inspect` endpoint.]
+                </p>
+              </article>
+
+              <!-- Chunk 2 -->
+              <article class="bg-light-surface-container-lowest border border-light-outline-variant/60 rounded-md p-gutter-md shadow-sm flex flex-col gap-gutter-xs">
+                <div class="flex flex-wrap items-center justify-between gap-gutter-sm">
+                  <div class="flex items-center gap-gutter-sm">
+                    <span class="px-2 py-0.5 rounded bg-light-surface-container text-light-primary font-mono text-mono-sm">Rank #2</span>
+                    <span class="font-title text-title-sm text-light-on-surface">Retrieval_Augmented_Generation_Survey.pdf</span>
+                  </div>
+                  <div class="flex items-center gap-gutter-sm font-mono text-mono-sm">
+                    <span class="text-light-on-surface-variant">Page: —</span>
+                    <span class="text-light-on-surface-variant">ID: chunk_—</span>
+                    <span class="px-2 py-0.5 rounded-full bg-light-surface-container text-light-secondary">Score: —</span>
+                  </div>
+                </div>
+                <p class="font-body text-body-sm text-light-on-surface-variant bg-light-surface-container-low/60 p-gutter-sm rounded border border-light-outline-variant/40">
+                  [Dynamic ChromaDB chunk text preview #2]
+                </p>
+              </article>
+
+              <!-- Chunk 3 -->
+              <article class="bg-light-surface-container-lowest border border-light-outline-variant/60 rounded-md p-gutter-md shadow-sm flex flex-col gap-gutter-xs">
+                <div class="flex flex-wrap items-center justify-between gap-gutter-sm">
+                  <div class="flex items-center gap-gutter-sm">
+                    <span class="px-2 py-0.5 rounded bg-light-surface-container text-light-primary font-mono text-mono-sm">Rank #3</span>
+                    <span class="font-title text-title-sm text-light-on-surface">Enterprise_AI_Governance_Policy_2026.pdf</span>
+                  </div>
+                  <div class="flex items-center gap-gutter-sm font-mono text-mono-sm">
+                    <span class="text-light-on-surface-variant">Page: —</span>
+                    <span class="text-light-on-surface-variant">ID: chunk_—</span>
+                    <span class="px-2 py-0.5 rounded-full bg-light-surface-container text-light-secondary">Score: —</span>
+                  </div>
+                </div>
+                <p class="font-body text-body-sm text-light-on-surface-variant bg-light-surface-container-low/60 p-gutter-sm rounded border border-light-outline-variant/40">
+                  [Dynamic ChromaDB chunk text preview #3]
+                </p>
+              </article>
+
+              <!-- Chunk 4 -->
+              <article class="bg-light-surface-container-lowest border border-light-outline-variant/60 rounded-md p-gutter-md shadow-sm flex flex-col gap-gutter-xs">
+                <div class="flex flex-wrap items-center justify-between gap-gutter-sm">
+                  <div class="flex items-center gap-gutter-sm">
+                    <span class="px-2 py-0.5 rounded bg-light-surface-container text-light-primary font-mono text-mono-sm">Rank #4</span>
+                    <span class="font-title text-title-sm text-light-on-surface">Enterprise_AI_Governance_Policy_2026.pdf</span>
+                  </div>
+                  <div class="flex items-center gap-gutter-sm font-mono text-mono-sm">
+                    <span class="text-light-on-surface-variant">Page: —</span>
+                    <span class="text-light-on-surface-variant">ID: chunk_—</span>
+                    <span class="px-2 py-0.5 rounded-full bg-light-surface-container text-light-secondary">Score: —</span>
+                  </div>
+                </div>
+                <p class="font-body text-body-sm text-light-on-surface-variant bg-light-surface-container-low/60 p-gutter-sm rounded border border-light-outline-variant/40">
+                  [Dynamic ChromaDB chunk text preview #4]
+                </p>
+              </article>
+
+              <!-- Chunk 5 -->
+              <article class="bg-light-surface-container-lowest border border-light-outline-variant/60 rounded-md p-gutter-md shadow-sm flex flex-col gap-gutter-xs">
+                <div class="flex flex-wrap items-center justify-between gap-gutter-sm">
+                  <div class="flex items-center gap-gutter-sm">
+                    <span class="px-2 py-0.5 rounded bg-light-surface-container text-light-primary font-mono text-mono-sm">Rank #5</span>
+                    <span class="font-title text-title-sm text-light-on-surface">Transformer_Attention_Notes.pdf</span>
+                  </div>
+                  <div class="flex items-center gap-gutter-sm font-mono text-mono-sm">
+                    <span class="text-light-on-surface-variant">Page: —</span>
+                    <span class="text-light-on-surface-variant">ID: chunk_—</span>
+                    <span class="px-2 py-0.5 rounded-full bg-light-surface-container text-light-secondary">Score: —</span>
+                  </div>
+                </div>
+                <p class="font-body text-body-sm text-light-on-surface-variant bg-light-surface-container-low/60 p-gutter-sm rounded border border-light-outline-variant/40">
+                  [Dynamic ChromaDB chunk text preview #5]
+                </p>
+              </article>
+            </div>
+          </section>
+
+          <!-- Context Sent to Gemini & Final AI-Generated Response -->
+          <section class="lg:col-span-5 flex flex-col gap-gutter-md">
+            <div class="bg-light-surface-container-low border border-light-outline-variant/60 rounded-md p-gutter-lg flex flex-col gap-gutter-sm">
+              <div class="flex items-center justify-between">
+                <h2 class="font-title text-title-md text-light-on-surface">Context Sent to Gemini</h2>
+                <span class="font-mono text-mono-sm text-light-on-surface-variant">Prompt Payload</span>
+              </div>
+              <pre class="font-mono text-mono-sm text-light-on-surface-variant bg-light-surface-container-lowest p-gutter-md rounded border border-light-outline-variant/50 overflow-x-auto whitespace-pre-wrap">System: Answer strictly using the retrieved context below. Cite document name and page number.
+Context: [Top 5 ChromaDB chunks injected dynamically]
+Question: [User query]</pre>
+            </div>
+
+            <div class="bg-light-surface-container-lowest border border-light-secondary/50 rounded-md p-gutter-lg shadow-sm flex flex-col gap-gutter-sm">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-gutter-xs">
+                  <span class="material-symbols-outlined text-light-secondary text-[20px]" aria-hidden="true">auto_awesome</span>
+                  <h2 class="font-title text-title-md text-light-on-surface">Generated Answer</h2>
+                </div>
+                <span class="px-2.5 py-0.5 rounded-full bg-light-surface-container text-light-secondary font-label text-label-sm">Gemini Output Slot</span>
+              </div>
+              <p class="font-body text-body-md text-light-on-surface-variant">
+                The synthesized response from Gemini—grounded exclusively in the 5 retrieved chunks on the left—will appear here once the backend API is connected.
+              </p>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const sidebar = document.getElementById('app-sidebar');
+      const backdrop = document.getElementById('sidebar-backdrop');
+      const openMobile = document.getElementById('sidebar-open-mobile');
+      const closeMobile = document.getElementById('sidebar-close-mobile');
+      const collapseBtn = document.getElementById('sidebar-collapse-btn');
+
+      function setMobileOpen(open) {
+        sidebar.classList.toggle('-translate-x-full', !open);
+        backdrop.classList.toggle('hidden', !open);
+      }
+      if (openMobile) openMobile.addEventListener('click', () => setMobileOpen(true));
+      if (closeMobile) closeMobile.addEventListener('click', () => setMobileOpen(false));
+      if (backdrop) backdrop.addEventListener('click', () => setMobileOpen(false));
+      if (collapseBtn) {
+        collapseBtn.addEventListener('click', () => {
+          const collapsed = sidebar.classList.toggle('w-20');
+          sidebar.classList.toggle('w-64', !collapsed);
+          sidebar.querySelectorAll('.sidebar-label').forEach(el => el.classList.toggle('hidden', collapsed));
+        });
+      }
+    })();
+  </script>
+
+
+</body></html>
