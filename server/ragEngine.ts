@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import path from "path";
 import { extractText, getDocumentProxy } from "unpdf";
-import { generateEmbeddings, RetrievedChunkRef } from "./geminiClient.js";
+import { embedQuery, generateEmbeddings, RetrievedChunkRef } from "./geminiClient.js";
 import {
   ConversationRecord,
   DocumentRecord,
@@ -257,7 +257,7 @@ class RagEngine {
     topK = 5,
     documentIds?: string[]
   ): Promise<RetrievedChunkRef[]> {
-    const [queryEmbedding] = await generateEmbeddings([question]);
+    const queryEmbedding = await embedQuery(question);
     return this.storage.searchSimilarChunks(queryEmbedding, topK, documentIds);
   }
 

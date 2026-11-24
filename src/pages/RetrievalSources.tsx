@@ -255,7 +255,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
             <div>
               <span className="text-[var(--dm-text-muted)] block">Generation Model</span>
               <span className="font-mono font-semibold text-blue-700 dark:text-blue-300">
-                {result?.model || health?.gemini_model || "gemini-4-hydrogen"}
+                {result?.model || health?.gemini_model || "gemini-3.1-flash-lite"}
               </span>
             </div>
             <div>
@@ -366,7 +366,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
                   Generated Answer
                 </h2>
                 <span className="font-mono text-cyan-700 dark:text-cyan-300">
-                  {result?.model || health?.gemini_model || "gemini-4-hydrogen"}
+                  {result?.model || health?.gemini_model || "gemini-3.1-flash-lite"}
                 </span>
               </div>
               {loading ? (

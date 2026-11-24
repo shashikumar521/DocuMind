@@ -1,6 +1,6 @@
 # DocuMind — AI-Powered Document Intelligence & RAG Platform
 
-DocuMind is a Retrieval-Augmented Generation (RAG) web application built as a **single-project full-stack Vercel deployment** powered by **React 19 + TypeScript + Vite**, **Node.js + Express** (running as a Vercel Serverless Function under `/api`), **PostgreSQL (`pgvector`)** for durable vector & metadata persistence, **Vercel Blob** for durable PDF object storage, and **Google Gemini** (`gemini-embedding-2` and `gemini-4-hydrogen`).
+DocuMind is a Retrieval-Augmented Generation (RAG) web application built as a **single-project full-stack Vercel deployment** powered by **React 19 + TypeScript + Vite**, **Node.js + Express** (running as a Vercel Serverless Function under `/api`), **PostgreSQL (`pgvector`)** for durable vector & metadata persistence, **Vercel Blob** for durable PDF object storage, and **Google Gemini** (`gemini-embedding-2` and `gemini-3.1-flash-lite`).
 
 ---
 
@@ -13,7 +13,7 @@ DocuMind is a Retrieval-Augmented Generation (RAG) web application built as a **
 - **Embeddings**: Google Gemini Embedding API (`gemini-embedding-2`, 3072 dimensions) via `@google/genai` on the server.
 - **Durable Metadata & Vector Store (PostgreSQL + `pgvector`)**: `server/storage.ts` automatically creates `documind_documents`, `documind_chunks` (`vector` column), `documind_conversations`, and `documind_meta` (see `server/schema.sql`), and executes cosine similarity retrieval using native `pgvector` `<=>` distance (`ORDER BY embedding <=> $1::vector ASC LIMIT $N`).
 - **Durable PDF Object Storage (`@vercel/blob`)**: Stores uploaded PDF files in Vercel Blob under `documind/<documentId>/<filename>` and deletes blobs automatically when documents are deleted or fail indexing.
-- **Grounded Answer Generation & Comparison**: Google Gemini (`gemini-4-hydrogen`) used consistently for grounded document Q&A, pipeline inspection, and side-by-side Without-RAG vs. With-RAG evaluation.
+- **Grounded Answer Generation & Comparison**: Google Gemini (`gemini-3.1-flash-lite`) used consistently for grounded document Q&A, pipeline inspection, and side-by-side Without-RAG vs. With-RAG evaluation.
 
 *(Note: For local development outside Vercel when `DATABASE_URL` is not configured, `server.ts` serves Vite middleware alongside Express on port `3000` and falls back to local dev storage. On Vercel, `DATABASE_URL` and `BLOB_READ_WRITE_TOKEN` are enforced.)*
 
@@ -42,7 +42,7 @@ Durable Vector & Metadata Persistence (PostgreSQL + pgvector)
 User Question ─▶ Query Embedding ─▶ pgvector Cosine Search (<=>) ─▶ Top-K Chunks
                                                                       │
                                                                       ▼
-                                       Gemini (gemini-4-hydrogen) with <retrieved_context>
+                                       Gemini (gemini-3.1-flash-lite) with <retrieved_context>
                                                                       │
                                                                       ▼
                                        Citation-Backed Answer + Source Filenames & Pages
@@ -73,7 +73,7 @@ In your Vercel Project Dashboard (**Storage** and **Settings → Environment Var
    - Optional: `BLOB_ACCESS` (`public` or `private`, defaults to `public`; automatically adapts to your Blob store access mode).
 3. **Google Gemini API Key**:
    - `GEMINI_API_KEY` — **Required.** Server-side only; never exposed to the browser.
-   - `GEMINI_MODEL` — Optional override (defaults to `gemini-4-hydrogen`).
+   - `GEMINI_MODEL` — Optional override (defaults to `gemini-3.1-flash-lite`).
 
 > **Note on Vercel Function Payload Limits:** Vercel Serverless Functions enforce a 4.5 MB HTTP request body limit per upload request. Keep individual PDF uploads under 4.5 MB when uploading through Vercel Functions.
 
@@ -84,7 +84,7 @@ In your Vercel Project Dashboard (**Storage** and **Settings → Environment Var
 See `.env.example`:
 
 - `GEMINI_API_KEY` — Server-side Google Gemini API key
-- `GEMINI_MODEL` — Gemini chat model ID (`gemini-4-hydrogen`)
+- `GEMINI_MODEL` — Gemini chat model ID (`gemini-3.1-flash-lite`)
 - `DATABASE_URL` — PostgreSQL connection string (`pgvector` enabled)
 - `BLOB_READ_WRITE_TOKEN` — Vercel Blob read/write token
 - `BLOB_ACCESS` — Optional (`public` or `private`)

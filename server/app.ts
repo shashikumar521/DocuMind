@@ -3,6 +3,7 @@ import express, { Express, Request, Response } from "express";
 import multer from "multer";
 import {
   formatGeminiError,
+  GEMINI_COMPARE_TOTAL_BUDGET_MS,
   GEMINI_EMBEDDING_MODEL,
   generateRagAnswer,
   generateWithoutRagAnswer,
@@ -240,6 +241,7 @@ export function createApiApp(): Express {
       await ragEngine.recordQuestion(question, answer, chunks);
       res.json({
         question,
+        model: getGeminiChatModel(),
         answer,
         sources: chunks,
         prompt_preview: promptPreview,
@@ -267,23 +269,18 @@ export function createApiApp(): Express {
         : 5;
 
     try {
-      const withoutRagPromise = generateWithoutRagAnswer(question).then(
-        (answer) => ({ ok: true as const, answer }),
-        (err: unknown) => ({ ok: false as const, err })
-      );
+      // Retrieve chunks first (cached for repeated queries) so we don't waste
+      // a baseline generation call if embedding/retrieval fails or rate-limits.
       const chunks = await ragEngine.retrieveChunks(question, topK, documentIds);
-      const [withoutRagRes, withRagResult] = await Promise.all([
-        withoutRagPromise,
-        generateRagAnswer(question, chunks),
+      const [withoutRagAnswer, withRagResult] = await Promise.all([
+        generateWithoutRagAnswer(question, { totalBudgetMs: GEMINI_COMPARE_TOTAL_BUDGET_MS }),
+        generateRagAnswer(question, chunks, { totalBudgetMs: GEMINI_COMPARE_TOTAL_BUDGET_MS }),
       ]);
-      if (!withoutRagRes.ok) {
-        throw withoutRagRes.err;
-      }
       res.json({
         question,
         model: getGeminiChatModel(),
         without_rag: {
-          answer: withoutRagRes.answer,
+          answer: withoutRagAnswer,
         },
         with_rag: {
           answer: withRagResult.answer,

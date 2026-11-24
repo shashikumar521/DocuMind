@@ -59,7 +59,7 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
     }
   };
 
-  const activeModel = result?.model || health?.gemini_model || "gemini-4-hydrogen";
+  const activeModel = result?.model || health?.gemini_model || "gemini-3.1-flash-lite";
 
   return (
     <AppShell
