@@ -14,7 +14,7 @@ import {
   CHUNK_SIZE_TOKENS,
   ragEngine,
 } from "./ragEngine.js";
-import { StorageConfigError } from "./storage.js";
+import { runWithBlobOidcContext, StorageConfigError } from "./storage.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -31,9 +31,23 @@ function formatRouteError(err: unknown): { status: number; message: string } {
   return formatGeminiError(err);
 }
 
+function extractOidcHeaderToken(req: Request): string | undefined {
+  const raw = req.headers["x-vercel-oidc-token"];
+  if (typeof raw === "string") {
+    return raw.trim() || undefined;
+  }
+  if (Array.isArray(raw) && typeof raw[0] === "string") {
+    return raw[0].trim() || undefined;
+  }
+  return undefined;
+}
+
 export function createApiApp(): Express {
   const app = express();
   app.set("trust proxy", 1);
+  app.use((req, _res, next) => {
+    runWithBlobOidcContext(extractOidcHeaderToken(req), next);
+  });
   app.use(express.json({ limit: "4mb" }));
 
   // Health & diagnostics endpoint
@@ -106,60 +120,85 @@ export function createApiApp(): Express {
     }
   });
 
+  // Secure server-side PDF download/preview (proxies private Vercel Blob via OIDC)
+  app.get("/api/documents/:documentId/download", async (req, res) => {
+    try {
+      const result = await ragEngine.getDocumentBinary(req.params.documentId);
+      if (!result) {
+        res.status(404).json({ detail: "Document PDF not found." });
+        return;
+      }
+
+      const disposition = req.query.download === "1" ? "attachment" : "inline";
+      const safeName = result.doc.filename.replace(/["\\\r\n]/g, "_");
+      res.setHeader("Content-Type", result.contentType || "application/pdf");
+      res.setHeader("Content-Disposition", `${disposition}; filename="${safeName}"`);
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.send(result.buffer);
+    } catch (err: unknown) {
+      const formatted = formatRouteError(err);
+      res.status(formatted.status).json({ detail: formatted.message });
+    }
+  });
+
   // Upload & index PDF(s)
   app.post("/api/documents/upload", (req, res) => {
-    upload.array("files", 10)(req, res, async (uploadErr: unknown) => {
-      if (uploadErr) {
-        const msg =
-          uploadErr instanceof multer.MulterError && uploadErr.code === "LIMIT_FILE_SIZE"
-            ? "File exceeds the 25 MB upload limit."
-            : uploadErr instanceof Error
-            ? uploadErr.message
-            : "Upload validation failed.";
-        res.status(400).json({ detail: msg });
-        return;
-      }
+    const requestOidcToken = extractOidcHeaderToken(req);
+    upload.array("files", 10)(req, res, (uploadErr: unknown) => {
+      void runWithBlobOidcContext(requestOidcToken, async () => {
+        if (uploadErr) {
+          const msg =
+            uploadErr instanceof multer.MulterError && uploadErr.code === "LIMIT_FILE_SIZE"
+              ? "File exceeds the 25 MB upload limit."
+              : uploadErr instanceof Error
+              ? uploadErr.message
+              : "Upload validation failed.";
+          res.status(400).json({ detail: msg });
+          return;
+        }
 
-      const files = (req.files as Express.Multer.File[]) || [];
-      if (files.length === 0) {
-        res.status(400).json({ detail: "No PDF files were uploaded." });
-        return;
-      }
+        const files = (req.files as Express.Multer.File[]) || [];
+        if (files.length === 0) {
+          res.status(400).json({ detail: "No PDF files were uploaded." });
+          return;
+        }
 
-      const processed = [];
-      const errors: { filename: string; detail: string }[] = [];
+        const processed = [];
+        const errors: { filename: string; detail: string }[] = [];
 
-      for (const file of files) {
-        try {
-          const doc = await ragEngine.processUploadedPdf(file.originalname, file.buffer);
-          processed.push(doc);
-        } catch (err: unknown) {
-          const formatted = formatRouteError(err);
-          errors.push({
-            filename: file.originalname,
-            detail: formatted.message,
+        for (const file of files) {
+          try {
+            const doc = await ragEngine.processUploadedPdf(file.originalname, file.buffer);
+            processed.push(doc);
+          } catch (err: unknown) {
+            const formatted = formatRouteError(err);
+            errors.push({
+              filename: file.originalname,
+              detail: formatted.message,
+            });
+          }
+        }
+
+        if (processed.length === 0 && errors.length > 0) {
+          let docsSnapshot: unknown[] = [];
+          try {
+            docsSnapshot = await ragEngine.listDocuments();
+          } catch {
+            docsSnapshot = [];
+          }
+          res.status(400).json({
+            detail: errors.map((e) => `${e.filename}: ${e.detail}`).join(" | "),
+            errors,
+            documents: docsSnapshot,
           });
+          return;
         }
-      }
 
-      if (processed.length === 0 && errors.length > 0) {
-        let docsSnapshot: unknown[] = [];
-        try {
-          docsSnapshot = await ragEngine.listDocuments();
-        } catch {
-          docsSnapshot = [];
-        }
-        res.status(400).json({
-          detail: errors.map((e) => `${e.filename}: ${e.detail}`).join(" | "),
+        res.status(errors.length > 0 ? 207 : 200).json({
+          documents: processed,
           errors,
-          documents: docsSnapshot,
         });
-        return;
-      }
-
-      res.status(errors.length > 0 ? 207 : 200).json({
-        documents: processed,
-        errors,
       });
     });
   });

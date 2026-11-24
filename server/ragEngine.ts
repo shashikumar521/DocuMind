@@ -88,6 +88,16 @@ class RagEngine {
     return this.storage.getDocument(documentId);
   }
 
+  async getDocumentBinary(
+    documentId: string
+  ): Promise<{ doc: DocumentRecord; buffer: Buffer; contentType: string } | null> {
+    const doc = await this.storage.getDocument(documentId);
+    if (!doc) return null;
+    const binary = await this.storage.getPdfBinary(doc);
+    if (!binary) return null;
+    return { doc, ...binary };
+  }
+
   async getTotalChunksCount(): Promise<number> {
     return this.storage.getTotalChunksCount();
   }

@@ -1,4 +1,5 @@
-import { del, put } from "@vercel/blob";
+import { del, get, put } from "@vercel/blob";
+import { AsyncLocalStorage } from "async_hooks";
 import fs from "fs";
 import path from "path";
 import { Pool } from "pg";
@@ -92,6 +93,7 @@ export interface StorageAdapter {
   clearHistory(): Promise<void>;
   getQuestionsAnswered(): Promise<number>;
   savePdfBinary(documentId: string, filename: string, buffer: Buffer): Promise<UploadedBinaryRef>;
+  getPdfBinary(doc: DocumentRecord): Promise<{ buffer: Buffer; contentType: string } | null>;
   deletePdfBinary(documentId: string, filename: string, blobUrl?: string | null): Promise<void>;
 }
 
@@ -131,12 +133,72 @@ function parseVectorColumn(raw: unknown): number[] {
   return [];
 }
 
+interface BlobRequestContextValue {
+  oidcToken?: string;
+}
+
+const blobRequestContext = new AsyncLocalStorage<BlobRequestContextValue>();
+const VERCEL_REQUEST_CONTEXT_SYMBOL = Symbol.for("@vercel/request-context");
+
+export function runWithBlobOidcContext<T>(oidcToken: string | undefined, fn: () => T): T {
+  const cleaned = oidcToken?.trim() || undefined;
+  return blobRequestContext.run({ oidcToken: cleaned }, fn);
+}
+
+function getVercelRequestContextOidcToken(): string | undefined {
+  const asyncStoreToken = blobRequestContext.getStore()?.oidcToken?.trim();
+  if (asyncStoreToken) return asyncStoreToken;
+
+  const ctxGlobal = (globalThis as Record<symbol, { get?: () => { headers?: Record<string, string | string[] | undefined> } } | undefined>)[
+    VERCEL_REQUEST_CONTEXT_SYMBOL
+  ];
+  const headerVal = ctxGlobal?.get?.()?.headers?.["x-vercel-oidc-token"];
+  if (typeof headerVal === "string" && headerVal.trim()) {
+    return headerVal.trim();
+  }
+  if (Array.isArray(headerVal) && typeof headerVal[0] === "string" && headerVal[0].trim()) {
+    return headerVal[0].trim();
+  }
+
+  const envToken = process.env.VERCEL_OIDC_TOKEN?.trim();
+  return envToken || undefined;
+}
+
+function getBlobStoreId(): string | undefined {
+  return process.env.BLOB_STORE_ID?.trim() || undefined;
+}
+
+function getBlobAccessMode(): "private" | "public" {
+  return process.env.BLOB_ACCESS === "public" ? "public" : "private";
+}
+
+function getBlobAuthOptions(): { token?: string; oidcToken?: string; storeId?: string } {
+  const storeId = getBlobStoreId();
+  const oidcToken = getVercelRequestContextOidcToken();
+  const readWriteToken = process.env.BLOB_READ_WRITE_TOKEN?.trim();
+
+  if (oidcToken && storeId) {
+    return { oidcToken, storeId };
+  }
+  if (readWriteToken) {
+    return { token: readWriteToken };
+  }
+  if (storeId) {
+    return { storeId };
+  }
+  return {};
+}
+
 function isVercelEnvironment(): boolean {
   return process.env.VERCEL === "1" || Boolean(process.env.VERCEL_ENV);
 }
 
 function hasBlobCredentials(): boolean {
-  return Boolean(process.env.BLOB_READ_WRITE_TOKEN?.trim() || process.env.VERCEL_OIDC_TOKEN?.trim());
+  return Boolean(
+    getBlobStoreId() ||
+      process.env.BLOB_READ_WRITE_TOKEN?.trim() ||
+      (getVercelRequestContextOidcToken() && getBlobStoreId())
+  );
 }
 
 /**
@@ -178,7 +240,7 @@ class PostgresBlobStorage implements StorageAdapter {
   private async bootstrapSchema(): Promise<void> {
     if (isVercelEnvironment() && !hasBlobCredentials()) {
       throw new StorageConfigError(
-        "BLOB_READ_WRITE_TOKEN is not configured. Connect a Vercel Blob store in Project Settings > Storage."
+        "Vercel Blob is not configured. Connect a Vercel Blob store with OIDC (BLOB_STORE_ID) or set BLOB_READ_WRITE_TOKEN in Project Settings > Storage."
       );
     }
 
@@ -274,13 +336,17 @@ class PostgresBlobStorage implements StorageAdapter {
 
   getInfo(): StorageInfo {
     const usesBlob = hasBlobCredentials();
+    const usesOidc = Boolean(getBlobStoreId() && !process.env.BLOB_READ_WRITE_TOKEN?.trim());
+    const blobLabel = usesOidc
+      ? `Vercel Blob (OIDC, ${getBlobAccessMode()})`
+      : "Vercel Blob";
     return {
       storage_mode: "production-durable",
       vector_store: this.pgVectorEnabled ? "postgres-pgvector" : "postgres-array",
       object_storage: usesBlob ? "vercel-blob" : "local-dev-fs",
       storage_label: this.pgVectorEnabled
-        ? "PostgreSQL (pgvector) + Vercel Blob"
-        : "PostgreSQL + Vercel Blob",
+        ? `PostgreSQL (pgvector) + ${blobLabel}`
+        : `PostgreSQL + ${blobLabel}`,
     };
   }
 
@@ -588,7 +654,7 @@ class PostgresBlobStorage implements StorageAdapter {
     if (!hasBlobCredentials()) {
       if (isVercelEnvironment()) {
         throw new StorageConfigError(
-          "BLOB_READ_WRITE_TOKEN is required to store PDF files durably on Vercel."
+          "Vercel Blob credentials are required to store PDF files durably on Vercel (configure OIDC with BLOB_STORE_ID or BLOB_READ_WRITE_TOKEN)."
         );
       }
       const uploadDir = path.resolve(process.cwd(), "uploads");
@@ -602,34 +668,60 @@ class PostgresBlobStorage implements StorageAdapter {
     }
 
     const blobPath = `documind/${documentId}/${filename}`;
-    const preferredAccess = process.env.BLOB_ACCESS === "private" ? "private" : "public";
+    const access = getBlobAccessMode();
+    const authOptions = getBlobAuthOptions();
 
-    try {
-      const uploaded = await put(blobPath, buffer, {
-        access: preferredAccess,
-        addRandomSuffix: true,
-        contentType: "application/pdf",
+    const uploaded = await put(blobPath, buffer, {
+      ...authOptions,
+      access,
+      addRandomSuffix: true,
+      contentType: "application/pdf",
+    });
+    return { blobUrl: uploaded.url, blobPathname: uploaded.pathname };
+  }
+
+  async getPdfBinary(doc: DocumentRecord): Promise<{ buffer: Buffer; contentType: string } | null> {
+    const target = doc.blob_url || doc.blob_pathname;
+    if (target && hasBlobCredentials()) {
+      const result = await get(target, {
+        ...getBlobAuthOptions(),
+        access: getBlobAccessMode(),
+        useCache: false,
       });
-      return { blobUrl: uploaded.url, blobPathname: uploaded.pathname };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.toLowerCase().includes("private store") || msg.toLowerCase().includes("public store")) {
-        const fallbackAccess = preferredAccess === "public" ? "private" : "public";
-        const uploaded = await put(blobPath, buffer, {
-          access: fallbackAccess,
-          addRandomSuffix: true,
-          contentType: "application/pdf",
-        });
-        return { blobUrl: uploaded.url, blobPathname: uploaded.pathname };
+      if (!result || result.statusCode !== 200 || !result.stream) {
+        return null;
       }
-      throw err;
+      const chunks: Uint8Array[] = [];
+      const reader = result.stream.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+      return {
+        buffer: Buffer.concat(chunks),
+        contentType: result.blob.contentType || "application/pdf",
+      };
     }
+
+    if (!isVercelEnvironment()) {
+      const uploadDir = path.resolve(process.cwd(), "uploads");
+      const safePath = path.resolve(uploadDir, `${doc.id}_${doc.filename}`);
+      if (safePath.startsWith(uploadDir + path.sep) && fs.existsSync(safePath)) {
+        return {
+          buffer: fs.readFileSync(safePath),
+          contentType: "application/pdf",
+        };
+      }
+    }
+
+    return null;
   }
 
   async deletePdfBinary(documentId: string, filename: string, blobUrl?: string | null): Promise<void> {
     if (blobUrl && hasBlobCredentials()) {
       try {
-        await del(blobUrl);
+        await del(blobUrl, getBlobAuthOptions());
       } catch {
         // Ignore missing blob object during cleanup
       }
@@ -842,6 +934,17 @@ class LocalDevJsonStorage implements StorageAdapter {
     return { blobUrl: null, blobPathname: null };
   }
 
+  async getPdfBinary(doc: DocumentRecord): Promise<{ buffer: Buffer; contentType: string } | null> {
+    const safeDiskPath = path.resolve(this.baseUploadDir, `${doc.id}_${doc.filename}`);
+    if (safeDiskPath.startsWith(this.baseUploadDir + path.sep) && fs.existsSync(safeDiskPath)) {
+      return {
+        buffer: fs.readFileSync(safeDiskPath),
+        contentType: "application/pdf",
+      };
+    }
+    return null;
+  }
+
   async deletePdfBinary(documentId: string, filename: string): Promise<void> {
     const safeDiskPath = path.resolve(this.baseUploadDir, `${documentId}_${filename}`);
     if (safeDiskPath.startsWith(this.baseUploadDir + path.sep) && fs.existsSync(safeDiskPath)) {
@@ -854,7 +957,7 @@ class UnconfiguredProductionStorage implements StorageAdapter {
   private missingMessage(): StorageConfigError {
     const missing: string[] = [];
     if (!process.env.DATABASE_URL?.trim()) missing.push("DATABASE_URL");
-    if (!hasBlobCredentials()) missing.push("BLOB_READ_WRITE_TOKEN");
+    if (!hasBlobCredentials()) missing.push("BLOB_STORE_ID (OIDC) or BLOB_READ_WRITE_TOKEN");
     return new StorageConfigError(
       `Production storage is not configured. Missing environment variable(s): ${missing.join(", ")}. Configure PostgreSQL and Vercel Blob in Vercel Project Settings.`
     );
@@ -868,7 +971,7 @@ class UnconfiguredProductionStorage implements StorageAdapter {
       storage_mode: "production-durable",
       vector_store: "postgres-pgvector",
       object_storage: "vercel-blob",
-      storage_label: "Missing DATABASE_URL / BLOB_READ_WRITE_TOKEN",
+      storage_label: "Missing DATABASE_URL / BLOB_STORE_ID",
     };
   }
   async listDocuments(): Promise<DocumentRecord[]> { throw this.missingMessage(); }
@@ -886,6 +989,7 @@ class UnconfiguredProductionStorage implements StorageAdapter {
   async clearHistory(): Promise<void> { throw this.missingMessage(); }
   async getQuestionsAnswered(): Promise<number> { throw this.missingMessage(); }
   async savePdfBinary(): Promise<UploadedBinaryRef> { throw this.missingMessage(); }
+  async getPdfBinary(): Promise<{ buffer: Buffer; contentType: string } | null> { throw this.missingMessage(); }
   async deletePdfBinary(): Promise<void> { throw this.missingMessage(); }
 }
 
