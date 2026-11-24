@@ -8,13 +8,13 @@ import {
   generateWithoutRagAnswer,
   getGeminiChatModel,
   isGeminiConfigured,
-} from "./geminiClient";
+} from "./geminiClient.js";
 import {
   CHUNK_OVERLAP_TOKENS,
   CHUNK_SIZE_TOKENS,
   ragEngine,
-} from "./ragEngine";
-import { StorageConfigError } from "./storage";
+} from "./ragEngine.js";
+import { StorageConfigError } from "./storage.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),

@@ -2,7 +2,7 @@ import { del, put } from "@vercel/blob";
 import fs from "fs";
 import path from "path";
 import { Pool } from "pg";
-import { RetrievedChunkRef } from "./geminiClient";
+import { RetrievedChunkRef } from "./geminiClient.js";
 
 export type ProcessingStatus =
   | "Uploaded"

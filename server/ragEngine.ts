@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import path from "path";
 import { extractText } from "unpdf";
-import { generateEmbeddings, RetrievedChunkRef } from "./geminiClient";
+import { generateEmbeddings, RetrievedChunkRef } from "./geminiClient.js";
 import {
   ConversationRecord,
   DocumentRecord,
@@ -9,7 +9,7 @@ import {
   ProcessingStatus,
   StorageInfo,
   StoredChunk,
-} from "./storage";
+} from "./storage.js";
 
 export type {
   ConversationRecord,
