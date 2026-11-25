@@ -224,7 +224,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
             {
               label: "Successful Queries",
               value: stats?.questions_answered ?? 0,
-              sub: "Grounded Gemini responses",
+              sub: "Grounded AI responses",
               icon: MessageSquareText,
               tone: "text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 border-emerald-400/25",
             },
@@ -299,7 +299,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
                 <p className="text-sm text-[var(--dm-text-muted)] max-w-md">
                   {searchQuery
                     ? "Try adjusting or clearing your document filter."
-                    : "Upload your first PDF to extract pages, generate Gemini embeddings, and start asking citation-backed questions."}
+                    : "Upload your first PDF to extract pages, generate vector embeddings, and start asking citation-backed questions."}
                 </p>
                 {!searchQuery && (
                   <button

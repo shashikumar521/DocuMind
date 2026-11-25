@@ -1,21 +1,26 @@
 import "dotenv/config";
-import express, { Express, Request, Response } from "express";
+import express, { Express, NextFunction, Request, Response } from "express";
 import multer from "multer";
 import {
-  formatGeminiError,
-  GEMINI_COMPARE_TOTAL_BUDGET_MS,
-  GEMINI_EMBEDDING_MODEL,
+  formatAiError,
   generateRagAnswer,
   generateWithoutRagAnswer,
-  getGeminiChatModel,
-  isGeminiConfigured,
-} from "./geminiClient.js";
+  getActiveAiProvider,
+  getActiveChatModel,
+  getActiveEmbeddingModel,
+  getCompareTotalBudgetMs,
+  isAiConfigured,
+} from "./aiClient.js";
 import {
   CHUNK_OVERLAP_TOKENS,
   CHUNK_SIZE_TOKENS,
   ragEngine,
 } from "./ragEngine.js";
-import { runWithBlobOidcContext, StorageConfigError } from "./storage.js";
+import {
+  runWithBlobOidcContext,
+  sanitizeDatabaseErrorMessage,
+  StorageConfigError,
+} from "./storage.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -27,9 +32,13 @@ const upload = multer({
 
 function formatRouteError(err: unknown): { status: number; message: string } {
   if (err instanceof StorageConfigError) {
-    return { status: err.statusCode, message: err.message };
+    return { status: err.statusCode, message: sanitizeDatabaseErrorMessage(err.message) };
   }
-  return formatGeminiError(err);
+  const formatted = formatAiError(err);
+  return {
+    status: formatted.status,
+    message: sanitizeDatabaseErrorMessage(formatted.message),
+  };
 }
 
 function extractOidcHeaderToken(req: Request): string | undefined {
@@ -53,12 +62,17 @@ export function createApiApp(): Express {
 
   // Health & diagnostics endpoint
   app.get("/api/health", async (_req, res) => {
+    const aiProvider = getActiveAiProvider();
+    const chatModel = getActiveChatModel(aiProvider);
+    const embeddingModel = getActiveEmbeddingModel(aiProvider);
+    const aiConfigured = isAiConfigured(aiProvider);
+
     try {
       await ragEngine.init();
       const [docs, chunksCount, embeddingDims] = await Promise.all([
         ragEngine.listDocuments(),
         ragEngine.getTotalChunksCount(),
-        ragEngine.getEmbeddingDimensions(),
+        ragEngine.getEmbeddingDimensions(aiProvider),
       ]);
       const indexedDocs = docs.filter((d) => d.status === "Indexed Successfully");
       const storageInfo = ragEngine.getStorageInfo();
@@ -66,14 +80,17 @@ export function createApiApp(): Express {
       res.json({
         status: "ok",
         backend: "node-express-rag",
+        ai_provider: aiProvider,
+        chat_model: chatModel,
+        ai_configured: aiConfigured,
         storage_mode: storageInfo.storage_mode,
         vector_store: storageInfo.vector_store,
         object_storage: storageInfo.object_storage,
         storage_file: storageInfo.storage_label,
-        embedding_model: GEMINI_EMBEDDING_MODEL,
+        embedding_model: embeddingModel,
         embedding_dimensions: embeddingDims,
-        gemini_model: getGeminiChatModel(),
-        gemini_configured: isGeminiConfigured(),
+        gemini_model: chatModel,
+        gemini_configured: aiConfigured,
         documents_count: docs.length,
         indexed_documents_count: indexedDocs.length,
         chunks_count: chunksCount,
@@ -87,11 +104,14 @@ export function createApiApp(): Express {
         status: "error",
         detail: formatted.message,
         backend: "node-express-rag",
+        ai_provider: aiProvider,
+        chat_model: chatModel,
+        ai_configured: aiConfigured,
         storage_mode: storageInfo.storage_mode,
         vector_store: storageInfo.vector_store,
         object_storage: storageInfo.object_storage,
-        gemini_model: getGeminiChatModel(),
-        gemini_configured: isGeminiConfigured(),
+        gemini_model: chatModel,
+        gemini_configured: aiConfigured,
       });
     }
   });
@@ -236,12 +256,13 @@ export function createApiApp(): Express {
         : 5;
 
     try {
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds);
-      const { answer, promptPreview } = await generateRagAnswer(question, chunks);
+      const provider = getActiveAiProvider();
+      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider);
+      const { answer, promptPreview } = await generateRagAnswer(question, chunks, { provider });
       await ragEngine.recordQuestion(question, answer, chunks);
       res.json({
         question,
-        model: getGeminiChatModel(),
+        model: getActiveChatModel(provider),
         answer,
         sources: chunks,
         prompt_preview: promptPreview,
@@ -269,16 +290,18 @@ export function createApiApp(): Express {
         : 5;
 
     try {
+      const provider = getActiveAiProvider();
+      const totalBudgetMs = getCompareTotalBudgetMs(provider);
       // Retrieve chunks first (cached for repeated queries) so we don't waste
       // a baseline generation call if embedding/retrieval fails or rate-limits.
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds);
+      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider);
       const [withoutRagAnswer, withRagResult] = await Promise.all([
-        generateWithoutRagAnswer(question, { totalBudgetMs: GEMINI_COMPARE_TOTAL_BUDGET_MS }),
-        generateRagAnswer(question, chunks, { totalBudgetMs: GEMINI_COMPARE_TOTAL_BUDGET_MS }),
+        generateWithoutRagAnswer(question, { totalBudgetMs, provider }),
+        generateRagAnswer(question, chunks, { totalBudgetMs, provider }),
       ]);
       res.json({
         question,
-        model: getGeminiChatModel(),
+        model: getActiveChatModel(provider),
         without_rag: {
           answer: withoutRagAnswer,
         },
@@ -314,19 +337,20 @@ export function createApiApp(): Express {
         : 5;
 
     try {
+      const provider = getActiveAiProvider();
       const [chunks, embeddingDims, totalChunks] = await Promise.all([
-        ragEngine.retrieveChunks(question, topK, documentIds),
-        ragEngine.getEmbeddingDimensions(),
+        ragEngine.retrieveChunks(question, topK, documentIds, provider),
+        ragEngine.getEmbeddingDimensions(provider),
         ragEngine.getTotalChunksCount(),
       ]);
-      const { answer, promptPreview } = await generateRagAnswer(question, chunks);
+      const { answer, promptPreview } = await generateRagAnswer(question, chunks, { provider });
       res.json({
         question,
         chunks,
         prompt_preview: promptPreview,
         answer,
-        model: getGeminiChatModel(),
-        embedding_model: GEMINI_EMBEDDING_MODEL,
+        model: getActiveChatModel(provider),
+        embedding_model: getActiveEmbeddingModel(provider),
         embedding_dimensions: embeddingDims,
         total_chunks_indexed: totalChunks,
         top_k: topK,
@@ -365,6 +389,25 @@ export function createApiApp(): Express {
       const formatted = formatRouteError(err);
       res.status(formatted.status).json({ detail: formatted.message });
     }
+  });
+
+  // JSON 404 fallback for unmatched /api routes (does not intercept SPA routes)
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ detail: "API endpoint not found." });
+  });
+
+  // Scoped JSON error handler for malformed JSON bodies or unexpected Express errors on /api routes
+  app.use("/api", (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (
+      err instanceof SyntaxError &&
+      "status" in err &&
+      (err as { status?: number }).status === 400
+    ) {
+      res.status(400).json({ detail: "Invalid JSON request body." });
+      return;
+    }
+    const formatted = formatRouteError(err);
+    res.status(formatted.status).json({ detail: formatted.message });
   });
 
   return app;

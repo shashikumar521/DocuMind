@@ -177,7 +177,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
       setActiveSources(res.sources || []);
       setHighlightedChunkId(res.sources?.[0]?.chunk_id ?? null);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to generate Gemini response.";
+      const msg = err instanceof Error ? err.message : "Failed to generate AI response.";
       setError(msg);
       setQuestionInput(q);
       pushToast({ kind: "error", title: "Chat request failed", description: msg });
@@ -431,7 +431,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                 </h2>
                 <p className="text-sm text-[var(--dm-text-muted)] leading-relaxed">
                   Select indexed PDFs on the left and enter a question below. DocuMind retrieves the
-                  top {preferences.topK} semantic chunks and synthesizes a Gemini response with
+                  top {preferences.topK} semantic chunks and synthesizes an AI response with
                   clickable page citations.
                 </p>
               </div>
@@ -553,7 +553,7 @@ export const AIDocumentChat: React.FC<AIDocumentChatProps> = ({
                     />
                   </div>
                   <span className="text-xs text-[var(--dm-text-muted)]">
-                    Retrieving top {preferences.topK} chunks &amp; generating Gemini response...
+                    Retrieving top {preferences.topK} chunks &amp; generating AI response...
                   </span>
                 </div>
               </div>

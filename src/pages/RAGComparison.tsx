@@ -59,14 +59,16 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
     }
   };
 
-  const activeModel = result?.model || health?.gemini_model || "gemini-3.1-flash-lite";
+  const activeModel =
+    result?.model || health?.chat_model || health?.gemini_model || "gemini-3.1-flash-lite";
+  const providerLabel = health?.ai_provider === "cloudflare" ? "Cloudflare AI" : "AI";
 
   return (
     <AppShell
       activePage="compare"
       onNavigate={onNavigate}
       title="RAG vs. Without RAG"
-      subtitle="Evaluate how semantic retrieval transforms accuracy using the exact same Gemini model."
+      subtitle="Evaluate how semantic retrieval transforms accuracy using the exact same LLM."
       preferences={preferences}
       headerActions={
         <div className="hidden sm:flex items-center gap-2 text-xs text-[var(--dm-text-muted)] font-mono">
@@ -158,7 +160,7 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
 
             <div className="flex-1 p-4 rounded-xl bg-[var(--dm-bg-secondary)]/80 border border-[var(--dm-border)] flex flex-col gap-3">
               <span className="font-mono text-[11px] text-[var(--dm-text-muted)]">
-                Standard Gemini Output ({activeModel})
+                Standard {providerLabel} Output ({activeModel})
               </span>
               {loading ? (
                 <div className="space-y-2.5">
@@ -270,7 +272,7 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
                 </>
               ) : (
                 <p className="text-sm text-[var(--dm-text-muted)] leading-relaxed">
-                  Submit a question above to inspect the grounded Gemini answer alongside the exact
+                  Submit a question above to inspect the grounded {providerLabel} answer alongside the exact
                   retrieved PDF passages.
                 </p>
               )}

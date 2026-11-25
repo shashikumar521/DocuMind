@@ -87,6 +87,9 @@ export interface RetrievalInspectResponse {
 export interface HealthStatus {
   status: string;
   backend: string;
+  ai_provider?: "gemini" | "cloudflare";
+  chat_model?: string;
+  ai_configured?: boolean;
   storage_mode?: string;
   vector_store: string;
   object_storage?: string;

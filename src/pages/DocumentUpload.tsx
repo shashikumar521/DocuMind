@@ -284,7 +284,7 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
             </h2>
             <p className="text-xs sm:text-sm text-[var(--dm-text-muted)] leading-relaxed">
               Accepts text-selectable <span className="font-mono text-[var(--dm-text-secondary)]">.pdf</span> files up to{" "}
-              <span className="font-mono text-[var(--dm-text-secondary)]">25 MB</span> (up to 10 per batch). Pages are extracted, split into overlapping chunks, embedded with Gemini, and persisted to vector storage.
+              <span className="font-mono text-[var(--dm-text-secondary)]">25 MB</span> (up to 10 per batch). Pages are extracted, split into overlapping chunks, embedded into vector representations, and persisted to vector storage.
             </p>
           </div>
 

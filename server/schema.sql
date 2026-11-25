@@ -31,11 +31,18 @@ CREATE TABLE IF NOT EXISTS documind_chunks (
   page_number INTEGER NOT NULL,
   text TEXT NOT NULL,
   token_count INTEGER NOT NULL,
-  embedding vector NOT NULL
+  embedding vector,
+  embedding_model TEXT,
+  embedding_cf vector(1024),
+  embedding_cf_model TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_documind_chunks_document_id
   ON documind_chunks (document_id);
+
+CREATE INDEX IF NOT EXISTS idx_documind_chunks_embedding_cf_hnsw
+  ON documind_chunks USING hnsw (embedding_cf vector_cosine_ops)
+  WHERE embedding_cf IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS documind_conversations (
   id TEXT PRIMARY KEY,

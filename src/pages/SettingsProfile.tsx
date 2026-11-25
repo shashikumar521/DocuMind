@@ -179,7 +179,7 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
                   Top-K retrieved chunks
                 </p>
                 <p className="text-xs text-[var(--dm-text-muted)]">
-                  Number of highest-similarity chunks passed to Gemini per query.
+                  Number of highest-similarity chunks passed to the AI model per query.
                 </p>
               </div>
               <select

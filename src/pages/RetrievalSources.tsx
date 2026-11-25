@@ -40,7 +40,7 @@ const PIPELINE_STEPS: {
   { id: "embed", num: "04", title: "Embedding Gen", sub: "Dense vectors", icon: Binary },
   { id: "store", num: "05", title: "Vector Storage", sub: "PostgreSQL + Blob", icon: Database },
   { id: "retrieve", num: "06", title: "Similarity Search", sub: "Cosine Top-K", icon: Search },
-  { id: "generate", num: "07", title: "Gemini Response", sub: "Cited synthesis", icon: MessageSquareText },
+  { id: "generate", num: "07", title: "LLM Response", sub: "Cited synthesis", icon: MessageSquareText },
 ];
 
 export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
@@ -102,7 +102,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
       activePage="retrieval"
       onNavigate={onNavigate}
       title="Pipeline Inspector"
-      subtitle="Inspect live chunk counts, embedding dimensions, similarity scores, and the exact prompt sent to Gemini."
+      subtitle="Inspect live chunk counts, embedding dimensions, similarity scores, and the exact prompt sent to the LLM."
       preferences={preferences}
     >
       <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto flex flex-col gap-6">
@@ -119,7 +119,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Enter a query to trace embedding retrieval, similarity scores, and Gemini prompt payload..."
+              placeholder="Enter a query to trace embedding retrieval, similarity scores, and LLM prompt payload..."
               className="flex-1 px-4 py-2.5 rounded-xl bg-[var(--dm-bg-secondary)] border border-[var(--dm-border)] text-sm text-[var(--dm-text)] placeholder:text-[var(--dm-text-muted)] focus:border-blue-400 focus:outline-none"
             />
             <button
@@ -249,13 +249,13 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
             <div>
               <span className="text-[var(--dm-text-muted)] block">Embedding Model</span>
               <span className="font-mono font-semibold text-[var(--dm-text)]">
-                {result?.embedding_model || health?.embedding_model || "gemini-embedding-2"}
+                {result?.embedding_model || health?.embedding_model || "—"}
               </span>
             </div>
             <div>
               <span className="text-[var(--dm-text-muted)] block">Generation Model</span>
               <span className="font-mono font-semibold text-blue-700 dark:text-blue-300">
-                {result?.model || health?.gemini_model || "gemini-3.1-flash-lite"}
+                {result?.model || health?.chat_model || health?.gemini_model || "—"}
               </span>
             </div>
             <div>
@@ -349,14 +349,14 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
             <div className="dm-card p-5 flex flex-col gap-3">
               <div className="flex items-center justify-between text-xs">
                 <h2 className="font-display text-sm font-semibold text-[var(--dm-text)]">
-                  Context Sent to Gemini
+                  Context Sent to LLM
                 </h2>
                 <span className="font-mono text-[var(--dm-text-muted)]">Prompt Payload</span>
               </div>
               <pre className="font-mono text-[11px] text-[var(--dm-text-secondary)] bg-[var(--dm-bg)] border border-[var(--dm-border)] p-3.5 rounded-xl overflow-x-auto whitespace-pre-wrap max-h-72 overflow-y-auto leading-relaxed">
                 {result
                   ? result.prompt_preview
-                  : "<retrieved_context>\n  Run a pipeline inspection query above to inspect the exact grounded prompt sent to Gemini.\n</retrieved_context>"}
+                  : "<retrieved_context>\n  Run a pipeline inspection query above to inspect the exact grounded prompt sent to the LLM.\n</retrieved_context>"}
               </pre>
             </div>
 
@@ -366,7 +366,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
                   Generated Answer
                 </h2>
                 <span className="font-mono text-cyan-700 dark:text-cyan-300">
-                  {result?.model || health?.gemini_model || "gemini-3.1-flash-lite"}
+                  {result?.model || health?.chat_model || health?.gemini_model || "—"}
                 </span>
               </div>
               {loading ? (
@@ -378,8 +378,8 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
                 <MarkdownRenderer content={result.answer} sources={result.chunks} />
               ) : (
                 <p className="text-sm text-[var(--dm-text-muted)] leading-relaxed">
-                  Gemini&apos;s citation-backed response synthesized strictly from the retrieved
-                  passages will appear here.
+                  The citation-backed response synthesized strictly from the retrieved passages will
+                  appear here.
                 </p>
               )}
             </div>

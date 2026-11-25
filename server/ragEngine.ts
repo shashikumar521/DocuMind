@@ -1,7 +1,14 @@
 import crypto from "crypto";
 import path from "path";
 import { extractText, getDocumentProxy } from "unpdf";
-import { embedQuery, generateEmbeddings, RetrievedChunkRef } from "./geminiClient.js";
+import {
+  AiProvider,
+  embedQuery,
+  generateEmbeddings,
+  getActiveAiProvider,
+  getActiveEmbeddingModel,
+  RetrievedChunkRef,
+} from "./aiClient.js";
 import {
   ConversationRecord,
   DocumentRecord,
@@ -102,8 +109,8 @@ class RagEngine {
     return this.storage.getTotalChunksCount();
   }
 
-  async getEmbeddingDimensions(): Promise<number | null> {
-    return this.storage.getEmbeddingDimensions();
+  async getEmbeddingDimensions(provider: AiProvider = getActiveAiProvider()): Promise<number | null> {
+    return this.storage.getEmbeddingDimensions(provider);
   }
 
   private async updateStatus(
@@ -207,14 +214,33 @@ class RagEngine {
       }
 
       await this.updateStatus(documentId, "Generating Embeddings", 75);
-      const vectors = await generateEmbeddings(rawChunks.map((c) => c.text));
+      const activeProvider = getActiveAiProvider();
+      const activeEmbeddingModel = getActiveEmbeddingModel(activeProvider);
+      const vectors = await generateEmbeddings(
+        rawChunks.map((c) => c.text),
+        activeProvider
+      );
 
       await this.updateStatus(documentId, "Indexing Vectors", 90);
-      const storedChunks: StoredChunk[] = rawChunks.map((c, idx) => ({
-        ...c,
-        embedding: vectors[idx],
-      }));
-      await this.storage.insertChunks(storedChunks);
+      const storedChunks: StoredChunk[] = rawChunks.map((c, idx) =>
+        activeProvider === "cloudflare"
+          ? {
+              ...c,
+              embedding: null,
+              embedding_model: null,
+              embedding_cf: vectors[idx],
+              embedding_cf_model: activeEmbeddingModel,
+            }
+          : {
+              ...c,
+              embedding: vectors[idx],
+              embedding_model: activeEmbeddingModel,
+            }
+      );
+      await this.storage.insertChunks(storedChunks, {
+        provider: activeProvider,
+        embeddingModel: activeEmbeddingModel,
+      });
 
       await this.updateStatus(documentId, "Indexed Successfully", 100, {
         pages: totalPages,
@@ -255,10 +281,15 @@ class RagEngine {
   async retrieveChunks(
     question: string,
     topK = 5,
-    documentIds?: string[]
+    documentIds?: string[],
+    provider: AiProvider = getActiveAiProvider()
   ): Promise<RetrievedChunkRef[]> {
-    const queryEmbedding = await embedQuery(question);
-    return this.storage.searchSimilarChunks(queryEmbedding, topK, documentIds);
+    const embeddingModel = getActiveEmbeddingModel(provider);
+    const queryEmbedding = await embedQuery(question, provider);
+    return this.storage.searchSimilarChunks(queryEmbedding, topK, documentIds, {
+      provider,
+      embeddingModel,
+    });
   }
 
   async recordQuestion(

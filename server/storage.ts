@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import fs from "fs";
 import path from "path";
 import { Pool } from "pg";
+import type { AiProvider } from "./aiClient.js";
 import { RetrievedChunkRef } from "./geminiClient.js";
 
 export type ProcessingStatus =
@@ -36,7 +37,23 @@ export interface StoredChunk {
   page_number: number;
   text: string;
   token_count: number;
-  embedding: number[];
+  embedding?: number[] | null;
+  embedding_model?: string | null;
+  embedding_cf?: number[] | null;
+  embedding_cf_model?: string | null;
+}
+
+export interface ChunkMigrationStats {
+  total_chunks: number;
+  gemini_chunks: number;
+  cloudflare_chunks: number;
+  missing_cloudflare_chunks: number;
+  missing_gemini_chunks: number;
+  has_embedding_cf_column: boolean;
+  has_embedding_model_column: boolean;
+  has_embedding_cf_model_column: boolean;
+  embedding_nullable: boolean;
+  pgvector_enabled: boolean;
 }
 
 export interface ConversationRecord {
@@ -79,15 +96,19 @@ export interface StorageAdapter {
     documentId: string,
     patch: Partial<Pick<DocumentRecord, "status" | "progress" | "pages" | "chunks_count" | "error_message" | "blob_url" | "blob_pathname">>
   ): Promise<DocumentRecord | null>;
-  insertChunks(chunks: StoredChunk[]): Promise<void>;
+  insertChunks(
+    chunks: StoredChunk[],
+    options?: { provider?: AiProvider; embeddingModel?: string }
+  ): Promise<void>;
   deleteDocument(documentId: string): Promise<{ deleted: boolean; blobUrl?: string | null; filename?: string }>;
   searchSimilarChunks(
     queryEmbedding: number[],
     topK: number,
-    documentIds?: string[]
+    documentIds?: string[],
+    options?: { provider?: AiProvider; embeddingModel?: string }
   ): Promise<RetrievedChunkRef[]>;
   getTotalChunksCount(): Promise<number>;
-  getEmbeddingDimensions(): Promise<number | null>;
+  getEmbeddingDimensions(provider?: AiProvider): Promise<number | null>;
   recordConversation(record: ConversationRecord): Promise<void>;
   getHistory(): Promise<ConversationRecord[]>;
   clearHistory(): Promise<void>;
@@ -193,6 +214,145 @@ function isVercelEnvironment(): boolean {
   return process.env.VERCEL === "1" || Boolean(process.env.VERCEL_ENV);
 }
 
+export interface DatabaseTargetInfo {
+  hostname: string;
+  databaseName: string;
+}
+
+export interface DatabaseIdentity {
+  hostname: string;
+  urlDatabaseName: string;
+  serverDatabaseName: string;
+  serverVersion: string;
+}
+
+export function parseDatabaseTargetInfo(databaseUrl: string): DatabaseTargetInfo {
+  let parsed: URL;
+  try {
+    parsed = new URL(databaseUrl.trim());
+  } catch {
+    throw new StorageConfigError(
+      "Configured DATABASE_URL is not a valid PostgreSQL connection URL.",
+      500
+    );
+  }
+  const hostname = parsed.hostname.trim().toLowerCase();
+  if (!hostname) {
+    throw new StorageConfigError("Configured DATABASE_URL is missing a database hostname.", 500);
+  }
+  const rawPath = parsed.pathname.replace(/^\/+/, "").split("/")[0] || "";
+  const databaseName = rawPath ? decodeURIComponent(rawPath).trim() : "";
+  return { hostname, databaseName };
+}
+
+export function isKnownProductionTarget(
+  target: { hostname: string; databaseName?: string },
+  env: NodeJS.ProcessEnv = process.env
+): { isProduction: boolean; reason?: string } {
+  const host = target.hostname.trim().toLowerCase();
+  const dbName = (target.databaseName ?? "").trim();
+  const dbLower = dbName.toLowerCase();
+
+  const prodUrl = env.PRODUCTION_DATABASE_URL?.trim();
+  if (prodUrl) {
+    try {
+      const prodParsed = parseDatabaseTargetInfo(prodUrl);
+      if (host === prodParsed.hostname) {
+        return { isProduction: true, reason: "matches PRODUCTION_DATABASE_URL host" };
+      }
+    } catch {
+      // Ignore malformed optional reference URL
+    }
+  }
+
+  const configuredProdHosts = [
+    env.PRODUCTION_DATABASE_HOST?.trim(),
+    ...(env.PRODUCTION_DATABASE_HOSTS?.split(",") ?? []).map((h) => h.trim()),
+  ]
+    .filter((h): h is string => Boolean(h))
+    .map((h) => h.toLowerCase());
+
+  if (configuredProdHosts.includes(host)) {
+    return { isProduction: true, reason: "matches PRODUCTION_DATABASE_HOST" };
+  }
+
+  const configuredProdDb = env.PRODUCTION_DATABASE_NAME?.trim();
+  if (configuredProdDb && configuredProdHosts.length === 0 && dbName === configuredProdDb) {
+    return { isProduction: true, reason: "matches PRODUCTION_DATABASE_NAME" };
+  }
+
+  if (
+    host.startsWith("prod.") ||
+    host.startsWith("prod-") ||
+    host.startsWith("production.") ||
+    host.startsWith("production-") ||
+    host.includes(".prod.") ||
+    host.includes(".production.") ||
+    host.includes("-prod.") ||
+    host.includes("-production.")
+  ) {
+    return { isProduction: true, reason: "hostname contains production identifier" };
+  }
+
+  if (
+    dbLower === "prod" ||
+    dbLower === "production" ||
+    dbLower.startsWith("prod_") ||
+    dbLower.startsWith("prod-") ||
+    dbLower.startsWith("production_") ||
+    dbLower.startsWith("production-") ||
+    dbLower.endsWith("_prod") ||
+    dbLower.endsWith("-prod") ||
+    dbLower.endsWith("_production") ||
+    dbLower.endsWith("-production")
+  ) {
+    return { isProduction: true, reason: "database name contains production identifier" };
+  }
+
+  return { isProduction: false };
+}
+
+export function assertPreviewDatabaseIsolation(
+  databaseUrl: string,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  if (env.VERCEL_ENV?.trim().toLowerCase() !== "preview") {
+    return;
+  }
+
+  if (env.TARGET_ENV?.trim().toLowerCase() === "production") {
+    throw new StorageConfigError(
+      "Preview deployment refused to run with TARGET_ENV=production.",
+      503
+    );
+  }
+
+  const target = parseDatabaseTargetInfo(databaseUrl);
+  const prodCheck = isKnownProductionTarget(target, env);
+  if (prodCheck.isProduction) {
+    throw new StorageConfigError(
+      `Preview deployment refused to connect to a Production PostgreSQL target (${target.hostname}${target.databaseName ? `/${target.databaseName}` : ""}: ${prodCheck.reason}). Configure an isolated Preview DATABASE_URL.`,
+      503
+    );
+  }
+
+  const expectedPreviewHost = env.PREVIEW_EXPECTED_DATABASE_HOST?.trim().toLowerCase();
+  if (expectedPreviewHost && target.hostname !== expectedPreviewHost) {
+    throw new StorageConfigError(
+      `Preview deployment refused: active DATABASE_URL host (${target.hostname}) does not match PREVIEW_EXPECTED_DATABASE_HOST (${expectedPreviewHost}).`,
+      503
+    );
+  }
+
+  const expectedPreviewDb = env.PREVIEW_EXPECTED_DATABASE_NAME?.trim();
+  if (expectedPreviewDb && target.databaseName && target.databaseName !== expectedPreviewDb) {
+    throw new StorageConfigError(
+      `Preview deployment refused: active DATABASE_URL database (${target.databaseName}) does not match PREVIEW_EXPECTED_DATABASE_NAME (${expectedPreviewDb}).`,
+      503
+    );
+  }
+}
+
 function hasBlobCredentials(): boolean {
   return Boolean(
     getBlobStoreId() ||
@@ -201,22 +361,47 @@ function hasBlobCredentials(): boolean {
   );
 }
 
+interface ChunkSchemaCapabilities {
+  hasEmbeddingModelColumn: boolean;
+  hasEmbeddingCfColumn: boolean;
+  hasEmbeddingCfModelColumn: boolean;
+  embeddingNullable: boolean;
+}
+
+export function sanitizeDatabaseErrorMessage(message: string): string {
+  return message.replace(/postgres(?:ql)?:\/\/[^\s'"`]+@/gi, "postgresql://***@");
+}
+
 /**
  * Durable production storage backed by PostgreSQL (with pgvector when available)
  * and Vercel Blob for PDF object storage.
  */
-class PostgresBlobStorage implements StorageAdapter {
+export class PostgresBlobStorage implements StorageAdapter {
   private pool: Pool;
+  private readonly databaseUrl: string;
   private initPromise: Promise<void> | null = null;
   private pgVectorEnabled = false;
+  private schemaCaps: ChunkSchemaCapabilities = {
+    hasEmbeddingModelColumn: false,
+    hasEmbeddingCfColumn: false,
+    hasEmbeddingCfModelColumn: false,
+    embeddingNullable: false,
+  };
 
-  constructor(databaseUrl: string) {
+  constructor(databaseUrl: string, poolOverride?: Pool) {
+    this.databaseUrl = databaseUrl;
+    if (poolOverride) {
+      this.pool = poolOverride;
+      this.attachPoolErrorListener();
+      return;
+    }
+    const serverless = isVercelEnvironment();
     const needsSsl =
       databaseUrl.includes("sslmode=") ||
       databaseUrl.includes("neon.tech") ||
       databaseUrl.includes("supabase") ||
       databaseUrl.includes("vercel-storage") ||
-      isVercelEnvironment();
+      serverless;
 
     let normalizedUrl = databaseUrl;
     let hasExplicitSslParam = false;
@@ -244,11 +429,25 @@ class PostgresBlobStorage implements StorageAdapter {
 
     this.pool = new Pool({
       connectionString: normalizedUrl,
-      max: 5,
-      idleTimeoutMillis: 20_000,
+      max: serverless ? 3 : 5,
+      idleTimeoutMillis: serverless ? 10_000 : 20_000,
       connectionTimeoutMillis: 10_000,
+      allowExitOnIdle: serverless,
       ssl: needsSsl && !hasExplicitSslParam ? { rejectUnauthorized: true } : undefined,
     });
+    this.attachPoolErrorListener();
+  }
+
+  private attachPoolErrorListener(): void {
+    const maybeEmitter = this.pool as unknown as {
+      on?: (event: string, listener: (err: unknown) => void) => void;
+    };
+    if (typeof maybeEmitter.on === "function") {
+      maybeEmitter.on("error", (err: unknown) => {
+        const rawMsg = err instanceof Error ? err.message : String(err ?? "unknown pool error");
+        console.error("[storage] PostgreSQL pool idle client error:", sanitizeDatabaseErrorMessage(rawMsg));
+      });
+    }
   }
 
   async init(): Promise<void> {
@@ -262,6 +461,8 @@ class PostgresBlobStorage implements StorageAdapter {
   }
 
   private async bootstrapSchema(): Promise<void> {
+    assertPreviewDatabaseIsolation(this.databaseUrl);
+
     if (isVercelEnvironment() && !hasBlobCredentials()) {
       throw new StorageConfigError(
         "Vercel Blob is not configured. Connect a Vercel Blob store with OIDC (BLOB_STORE_ID) or set BLOB_READ_WRITE_TOKEN in Project Settings > Storage."
@@ -310,7 +511,10 @@ class PostgresBlobStorage implements StorageAdapter {
             page_number INTEGER NOT NULL,
             text TEXT NOT NULL,
             token_count INTEGER NOT NULL,
-            embedding vector NOT NULL
+            embedding vector,
+            embedding_model TEXT,
+            embedding_cf vector(1024),
+            embedding_cf_model TEXT
           );
         `);
       } else {
@@ -322,7 +526,10 @@ class PostgresBlobStorage implements StorageAdapter {
             page_number INTEGER NOT NULL,
             text TEXT NOT NULL,
             token_count INTEGER NOT NULL,
-            embedding DOUBLE PRECISION[] NOT NULL
+            embedding DOUBLE PRECISION[],
+            embedding_model TEXT,
+            embedding_cf DOUBLE PRECISION[],
+            embedding_cf_model TEXT
           );
         `);
       }
@@ -330,6 +537,23 @@ class PostgresBlobStorage implements StorageAdapter {
       await client.query(
         "CREATE INDEX IF NOT EXISTS idx_documind_chunks_document_id ON documind_chunks (document_id);"
       );
+
+      // Read-only schema capability inspection (never runs ALTER TABLE / UPDATE / CREATE INDEX on existing tables)
+      const colRes = await client.query<{ column_name: string; is_nullable: string }>(
+        `SELECT column_name, is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'documind_chunks'`
+      );
+      const colMap = new Map(
+        colRes.rows.map((r) => [String(r.column_name), String(r.is_nullable).toUpperCase() === "YES"])
+      );
+      this.schemaCaps = {
+        hasEmbeddingModelColumn: colMap.has("embedding_model"),
+        hasEmbeddingCfColumn: colMap.has("embedding_cf"),
+        hasEmbeddingCfModelColumn: colMap.has("embedding_cf_model"),
+        embeddingNullable: colMap.get("embedding") ?? false,
+      };
 
       await client.query(`
         CREATE TABLE IF NOT EXISTS documind_conversations (
@@ -491,30 +715,91 @@ class PostgresBlobStorage implements StorageAdapter {
     return res.rows[0] ? this.mapDocRow(res.rows[0]) : null;
   }
 
-  async insertChunks(chunks: StoredChunk[]): Promise<void> {
+  async insertChunks(
+    chunks: StoredChunk[],
+    options: { provider?: AiProvider; embeddingModel?: string } = {}
+  ): Promise<void> {
     if (chunks.length === 0) return;
     await this.init();
+    const provider = options.provider ?? "gemini";
+
+    if (provider === "cloudflare") {
+      if (!this.schemaCaps.hasEmbeddingCfColumn || !this.schemaCaps.embeddingNullable) {
+        throw new StorageConfigError(
+          "Database migration 001_cloudflare_embeddings.sql has not been applied yet (missing nullable `embedding` or `embedding_cf` column). Run the explicit SQL migration before indexing with AI_PROVIDER=cloudflare."
+        );
+      }
+    }
+
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const sql = this.pgVectorEnabled
-        ? `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding)
-           VALUES ($1, $2, $3, $4, $5, $6, $7::vector)`
-        : `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding)
-           VALUES ($1, $2, $3, $4, $5, $6, $7::double precision[])`;
 
-      for (const c of chunks) {
-        const embeddingParam = this.pgVectorEnabled ? toVectorLiteral(c.embedding) : c.embedding;
-        await client.query(sql, [
-          c.chunk_id,
-          c.document_id,
-          c.filename,
-          c.page_number,
-          c.text,
-          c.token_count,
-          embeddingParam,
-        ]);
+      if (provider === "cloudflare") {
+        const sql = this.pgVectorEnabled
+          ? `INSERT INTO documind_chunks (
+               chunk_id, document_id, filename, page_number, text, token_count,
+               embedding, embedding_cf, embedding_cf_model
+             ) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7::vector, $8)`
+          : `INSERT INTO documind_chunks (
+               chunk_id, document_id, filename, page_number, text, token_count,
+               embedding, embedding_cf, embedding_cf_model
+             ) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7::double precision[], $8)`;
+
+        for (const c of chunks) {
+          const vec = c.embedding_cf;
+          if (!Array.isArray(vec) || vec.length === 0) {
+            throw new Error(`Missing Cloudflare embedding vector for chunk ${c.chunk_id}.`);
+          }
+          const embeddingParam = this.pgVectorEnabled ? toVectorLiteral(vec) : vec;
+          const cfModel = c.embedding_cf_model ?? options.embeddingModel ?? "@cf/baai/bge-m3";
+          await client.query(sql, [
+            c.chunk_id,
+            c.document_id,
+            c.filename,
+            c.page_number,
+            c.text,
+            c.token_count,
+            embeddingParam,
+            cfModel,
+          ]);
+        }
+      } else {
+        const includeModelCol = this.schemaCaps.hasEmbeddingModelColumn;
+        const sql = this.pgVectorEnabled
+          ? includeModelCol
+            ? `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding, embedding_model)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8)`
+            : `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::vector)`
+          : includeModelCol
+          ? `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding, embedding_model)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::double precision[], $8)`
+          : `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::double precision[])`;
+
+        for (const c of chunks) {
+          const vec = c.embedding;
+          if (!Array.isArray(vec) || vec.length === 0) {
+            throw new Error(`Missing Gemini embedding vector for chunk ${c.chunk_id}.`);
+          }
+          const embeddingParam = this.pgVectorEnabled ? toVectorLiteral(vec) : vec;
+          const params: unknown[] = [
+            c.chunk_id,
+            c.document_id,
+            c.filename,
+            c.page_number,
+            c.text,
+            c.token_count,
+            embeddingParam,
+          ];
+          if (includeModelCol) {
+            params.push(c.embedding_model ?? options.embeddingModel ?? "gemini-embedding-2");
+          }
+          await client.query(sql, params);
+        }
       }
+
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");
@@ -543,30 +828,58 @@ class PostgresBlobStorage implements StorageAdapter {
   async searchSimilarChunks(
     queryEmbedding: number[],
     topK: number,
-    documentIds?: string[]
+    documentIds?: string[],
+    options: { provider?: AiProvider; embeddingModel?: string } = {}
   ): Promise<RetrievedChunkRef[]> {
     await this.init();
+    const provider = options.provider ?? "gemini";
     const hasFilter = Array.isArray(documentIds) && documentIds.length > 0;
+
+    if (provider === "cloudflare" && !this.schemaCaps.hasEmbeddingCfColumn) {
+      throw new StorageConfigError(
+        "Database migration 001_cloudflare_embeddings.sql has not been applied yet (`embedding_cf` column missing). Run the explicit SQL migration and backfill before querying with AI_PROVIDER=cloudflare."
+      );
+    }
+
+    const storedDims = await this.getEmbeddingDimensions(provider);
+    if (storedDims !== null && queryEmbedding.length !== storedDims) {
+      throw new Error(
+        `Vector dimension mismatch for ${provider} retrieval: query vector has ${queryEmbedding.length} dimensions while stored chunks have ${storedDims} dimensions.`
+      );
+    }
+
+    const vectorCol = provider === "cloudflare" ? "embedding_cf" : "embedding";
+    const whereClauses: string[] = [`${vectorCol} IS NOT NULL`];
+    const baseParams: unknown[] = [];
+
+    if (provider === "cloudflare" && options.embeddingModel && this.schemaCaps.hasEmbeddingCfModelColumn) {
+      baseParams.push(options.embeddingModel);
+      whereClauses.push(`embedding_cf_model = $${baseParams.length}`);
+    } else if (provider === "gemini" && options.embeddingModel && this.schemaCaps.hasEmbeddingModelColumn) {
+      baseParams.push(options.embeddingModel);
+      whereClauses.push(`(embedding_model IS NULL OR embedding_model = $${baseParams.length})`);
+    }
+
+    if (hasFilter) {
+      baseParams.push(documentIds);
+      whereClauses.push(`document_id = ANY($${baseParams.length}::text[])`);
+    }
+
+    const whereSql = whereClauses.join(" AND ");
 
     if (this.pgVectorEnabled) {
       const vecLiteral = toVectorLiteral(queryEmbedding);
-      const sql = hasFilter
-        ? `SELECT chunk_id, document_id, filename, page_number, text,
-                  (embedding <=> $1::vector) AS distance,
-                  (1 - (embedding <=> $1::vector)) AS similarity
-           FROM documind_chunks
-           WHERE document_id = ANY($2::text[])
-           ORDER BY embedding <=> $1::vector ASC
-           LIMIT $3`
-        : `SELECT chunk_id, document_id, filename, page_number, text,
-                  (embedding <=> $1::vector) AS distance,
-                  (1 - (embedding <=> $1::vector)) AS similarity
-           FROM documind_chunks
-           ORDER BY embedding <=> $1::vector ASC
-           LIMIT $2`;
+      const vecIdx = baseParams.length + 1;
+      const limitIdx = baseParams.length + 2;
+      const sql = `SELECT chunk_id, document_id, filename, page_number, text,
+                          (${vectorCol} <=> $${vecIdx}::vector) AS distance,
+                          (1 - (${vectorCol} <=> $${vecIdx}::vector)) AS similarity
+                   FROM documind_chunks
+                   WHERE ${whereSql}
+                   ORDER BY ${vectorCol} <=> $${vecIdx}::vector ASC
+                   LIMIT $${limitIdx}`;
 
-      const params = hasFilter ? [vecLiteral, documentIds, topK] : [vecLiteral, topK];
-      const res = await this.pool.query(sql, params);
+      const res = await this.pool.query(sql, [...baseParams, vecLiteral, topK]);
       return res.rows.map((row, idx) => {
         const sim = Number(row.similarity ?? 0);
         const dist = Number(row.distance ?? 1 - sim);
@@ -583,22 +896,26 @@ class PostgresBlobStorage implements StorageAdapter {
       });
     }
 
-    const sql = hasFilter
-      ? "SELECT chunk_id, document_id, filename, page_number, text, embedding FROM documind_chunks WHERE document_id = ANY($1::text[])"
-      : "SELECT chunk_id, document_id, filename, page_number, text, embedding FROM documind_chunks";
-    const res = await this.pool.query(sql, hasFilter ? [documentIds] : []);
-    const scored = res.rows.map((row) => {
-      const sim = cosineSimilarity(queryEmbedding, parseVectorColumn(row.embedding));
-      return {
-        chunk_id: String(row.chunk_id),
-        document_id: String(row.document_id),
-        filename: String(row.filename),
-        page_number: Number(row.page_number),
-        text: String(row.text),
-        similarity: sim,
-        distance: 1 - sim,
-      };
-    });
+    const sql = `SELECT chunk_id, document_id, filename, page_number, text, ${vectorCol} AS vec
+                 FROM documind_chunks
+                 WHERE ${whereSql}`;
+    const res = await this.pool.query(sql, baseParams);
+    const scored = res.rows
+      .map((row) => {
+        const vec = parseVectorColumn(row.vec);
+        if (vec.length !== queryEmbedding.length) return null;
+        const sim = cosineSimilarity(queryEmbedding, vec);
+        return {
+          chunk_id: String(row.chunk_id),
+          document_id: String(row.document_id),
+          filename: String(row.filename),
+          page_number: Number(row.page_number),
+          text: String(row.text),
+          similarity: sim,
+          distance: 1 - sim,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
     scored.sort((a, b) => b.similarity - a.similarity);
     return scored.slice(0, topK).map((item, idx) => ({
       rank: idx + 1,
@@ -618,14 +935,195 @@ class PostgresBlobStorage implements StorageAdapter {
     return Number(res.rows[0]?.cnt ?? 0);
   }
 
-  async getEmbeddingDimensions(): Promise<number | null> {
+  async getEmbeddingDimensions(provider: AiProvider = "gemini"): Promise<number | null> {
     await this.init();
+    if (provider === "cloudflare" && !this.schemaCaps.hasEmbeddingCfColumn) {
+      return null;
+    }
+    const vectorCol = provider === "cloudflare" ? "embedding_cf" : "embedding";
     const sql = this.pgVectorEnabled
-      ? "SELECT vector_dims(embedding) AS dims FROM documind_chunks LIMIT 1"
-      : "SELECT array_length(embedding, 1) AS dims FROM documind_chunks LIMIT 1";
+      ? `SELECT vector_dims(${vectorCol}) AS dims FROM documind_chunks WHERE ${vectorCol} IS NOT NULL LIMIT 1`
+      : `SELECT array_length(${vectorCol}, 1) AS dims FROM documind_chunks WHERE ${vectorCol} IS NOT NULL LIMIT 1`;
     const res = await this.pool.query(sql);
     const dims = res.rows[0]?.dims;
     return typeof dims === "number" && dims > 0 ? dims : null;
+  }
+
+  async getChunkMigrationStats(): Promise<ChunkMigrationStats> {
+    await this.init();
+    const hasCf = this.schemaCaps.hasEmbeddingCfColumn;
+    const cfSelect = hasCf
+      ? `COUNT(*) FILTER (WHERE embedding_cf IS NOT NULL)::int AS cloudflare_chunks,
+         COUNT(*) FILTER (WHERE embedding_cf IS NULL)::int AS missing_cloudflare_chunks,
+         COUNT(*) FILTER (WHERE embedding IS NULL AND embedding_cf IS NOT NULL)::int AS missing_gemini_chunks`
+      : `0::int AS cloudflare_chunks,
+         COUNT(*)::int AS missing_cloudflare_chunks,
+         0::int AS missing_gemini_chunks`;
+
+    const res = await this.pool.query<{
+      total_chunks: number;
+      gemini_chunks: number;
+      cloudflare_chunks: number;
+      missing_cloudflare_chunks: number;
+      missing_gemini_chunks: number;
+    }>(
+      `SELECT
+         COUNT(*)::int AS total_chunks,
+         COUNT(*) FILTER (WHERE embedding IS NOT NULL)::int AS gemini_chunks,
+         ${cfSelect}
+       FROM documind_chunks`
+    );
+    const row = res.rows[0];
+    return {
+      total_chunks: Number(row?.total_chunks ?? 0),
+      gemini_chunks: Number(row?.gemini_chunks ?? 0),
+      cloudflare_chunks: Number(row?.cloudflare_chunks ?? 0),
+      missing_cloudflare_chunks: Number(row?.missing_cloudflare_chunks ?? 0),
+      missing_gemini_chunks: Number(row?.missing_gemini_chunks ?? 0),
+      has_embedding_cf_column: this.schemaCaps.hasEmbeddingCfColumn,
+      has_embedding_model_column: this.schemaCaps.hasEmbeddingModelColumn,
+      has_embedding_cf_model_column: this.schemaCaps.hasEmbeddingCfModelColumn,
+      embedding_nullable: this.schemaCaps.embeddingNullable,
+      pgvector_enabled: this.pgVectorEnabled,
+    };
+  }
+
+  async fetchChunksNeedingCloudflareEmbedding(
+    limit: number
+  ): Promise<Array<{ chunk_id: string; text: string }>> {
+    await this.init();
+    if (!this.schemaCaps.hasEmbeddingCfColumn) {
+      throw new StorageConfigError(
+        "Cannot backfill Cloudflare embeddings: `embedding_cf` column does not exist. Run migrations/001_cloudflare_embeddings.sql first."
+      );
+    }
+    const res = await this.pool.query<{ chunk_id: string; text: string }>(
+      `SELECT chunk_id, text
+       FROM documind_chunks
+       WHERE embedding_cf IS NULL
+       ORDER BY chunk_id ASC
+       LIMIT $1`,
+      [limit]
+    );
+    return res.rows.map((r) => ({ chunk_id: String(r.chunk_id), text: String(r.text) }));
+  }
+
+  async saveCloudflareChunkEmbeddings(
+    items: Array<{ chunk_id: string; embedding_cf: number[]; embedding_cf_model: string }>
+  ): Promise<number> {
+    if (items.length === 0) return 0;
+    await this.init();
+    if (!this.schemaCaps.hasEmbeddingCfColumn) {
+      throw new StorageConfigError(
+        "Cannot save Cloudflare embeddings: `embedding_cf` column does not exist."
+      );
+    }
+    const client = await this.pool.connect();
+    let updated = 0;
+    try {
+      await client.query("BEGIN");
+      const sql = this.pgVectorEnabled
+        ? `UPDATE documind_chunks
+           SET embedding_cf = $1::vector, embedding_cf_model = $2
+           WHERE chunk_id = $3 AND embedding_cf IS NULL`
+        : `UPDATE documind_chunks
+           SET embedding_cf = $1::double precision[], embedding_cf_model = $2
+           WHERE chunk_id = $3 AND embedding_cf IS NULL`;
+      for (const item of items) {
+        const param = this.pgVectorEnabled ? toVectorLiteral(item.embedding_cf) : item.embedding_cf;
+        const res = await client.query(sql, [param, item.embedding_cf_model, item.chunk_id]);
+        updated += res.rowCount ?? 0;
+      }
+      await client.query("COMMIT");
+      return updated;
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async fetchChunksNeedingGeminiEmbedding(
+    limit: number
+  ): Promise<Array<{ chunk_id: string; text: string }>> {
+    await this.init();
+    const res = await this.pool.query<{ chunk_id: string; text: string }>(
+      `SELECT chunk_id, text
+       FROM documind_chunks
+       WHERE embedding IS NULL
+       ORDER BY chunk_id ASC
+       LIMIT $1`,
+      [limit]
+    );
+    return res.rows.map((r) => ({ chunk_id: String(r.chunk_id), text: String(r.text) }));
+  }
+
+  async saveGeminiChunkEmbeddings(
+    items: Array<{ chunk_id: string; embedding: number[]; embedding_model: string }>
+  ): Promise<number> {
+    if (items.length === 0) return 0;
+    await this.init();
+    const client = await this.pool.connect();
+    let updated = 0;
+    try {
+      await client.query("BEGIN");
+      const includeModel = this.schemaCaps.hasEmbeddingModelColumn;
+      const sql = this.pgVectorEnabled
+        ? includeModel
+          ? `UPDATE documind_chunks
+             SET embedding = $1::vector, embedding_model = $2
+             WHERE chunk_id = $3 AND embedding IS NULL`
+          : `UPDATE documind_chunks
+             SET embedding = $1::vector
+             WHERE chunk_id = $2 AND embedding IS NULL`
+        : includeModel
+        ? `UPDATE documind_chunks
+           SET embedding = $1::double precision[], embedding_model = $2
+           WHERE chunk_id = $3 AND embedding IS NULL`
+        : `UPDATE documind_chunks
+           SET embedding = $1::double precision[]
+           WHERE chunk_id = $2 AND embedding IS NULL`;
+
+      for (const item of items) {
+        const param = this.pgVectorEnabled ? toVectorLiteral(item.embedding) : item.embedding;
+        const params = includeModel
+          ? [param, item.embedding_model, item.chunk_id]
+          : [param, item.chunk_id];
+        const res = await client.query(sql, params);
+        updated += res.rowCount ?? 0;
+      }
+      await client.query("COMMIT");
+      return updated;
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async inspectDatabaseIdentity(): Promise<DatabaseIdentity> {
+    const target = parseDatabaseTargetInfo(this.databaseUrl);
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query<{ current_database: string; server_version: string }>(
+        "SELECT current_database() AS current_database, current_setting('server_version') AS server_version"
+      );
+      const row = res.rows[0];
+      return {
+        hostname: target.hostname,
+        urlDatabaseName: target.databaseName,
+        serverDatabaseName: String(row?.current_database ?? "").trim(),
+        serverVersion: String(row?.server_version ?? "unknown").trim(),
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  async close(): Promise<void> {
+    await this.pool.end();
   }
 
   async recordConversation(record: ConversationRecord): Promise<void> {
@@ -772,13 +1270,17 @@ interface LocalStoreFile {
 /**
  * Local development fallback used ONLY outside Vercel when DATABASE_URL is not configured.
  */
-class LocalDevJsonStorage implements StorageAdapter {
+export class LocalDevJsonStorage implements StorageAdapter {
   private baseDataDir = path.resolve(process.cwd(), "data");
   private baseUploadDir = path.resolve(process.cwd(), "uploads");
   private storePath = path.resolve(this.baseDataDir, "documind_store.json");
   private store: LocalStoreFile;
 
-  constructor() {
+  constructor(customStorePath?: string) {
+    if (customStorePath) {
+      this.storePath = path.resolve(customStorePath);
+      this.baseDataDir = path.dirname(this.storePath);
+    }
     this.ensureDirs();
     this.store = this.loadStore();
   }
@@ -865,7 +1367,10 @@ class LocalDevJsonStorage implements StorageAdapter {
     return existing;
   }
 
-  async insertChunks(chunks: StoredChunk[]): Promise<void> {
+  async insertChunks(
+    chunks: StoredChunk[],
+    _options: { provider?: AiProvider; embeddingModel?: string } = {}
+  ): Promise<void> {
     this.store.chunks.push(...chunks);
     this.saveStore();
   }
@@ -882,19 +1387,33 @@ class LocalDevJsonStorage implements StorageAdapter {
   async searchSimilarChunks(
     queryEmbedding: number[],
     topK: number,
-    documentIds?: string[]
+    documentIds?: string[],
+    options: { provider?: AiProvider; embeddingModel?: string } = {}
   ): Promise<RetrievedChunkRef[]> {
+    const provider = options.provider ?? "gemini";
     const scopeSet =
       documentIds && documentIds.length > 0 ? new Set(documentIds) : null;
 
     const candidates = this.store.chunks.filter((c) => {
       if (scopeSet && !scopeSet.has(c.document_id)) return false;
       const doc = this.store.documents[c.document_id];
-      return doc && doc.status === "Indexed Successfully";
+      if (!doc || doc.status !== "Indexed Successfully") return false;
+      const vec = provider === "cloudflare" ? c.embedding_cf : c.embedding;
+      if (!Array.isArray(vec) || vec.length !== queryEmbedding.length) return false;
+      if (
+        provider === "cloudflare" &&
+        options.embeddingModel &&
+        c.embedding_cf_model &&
+        c.embedding_cf_model !== options.embeddingModel
+      ) {
+        return false;
+      }
+      return true;
     });
 
     const scored = candidates.map((chunk) => {
-      const sim = cosineSimilarity(queryEmbedding, chunk.embedding);
+      const vec = (provider === "cloudflare" ? chunk.embedding_cf : chunk.embedding) ?? [];
+      const sim = cosineSimilarity(queryEmbedding, vec);
       return {
         chunk,
         similarity: sim,
@@ -919,11 +1438,14 @@ class LocalDevJsonStorage implements StorageAdapter {
     return this.store.chunks.length;
   }
 
-  async getEmbeddingDimensions(): Promise<number | null> {
-    const first = this.store.chunks[0];
-    return first && Array.isArray(first.embedding) && first.embedding.length > 0
-      ? first.embedding.length
-      : null;
+  async getEmbeddingDimensions(provider: AiProvider = "gemini"): Promise<number | null> {
+    for (const chunk of this.store.chunks) {
+      const vec = provider === "cloudflare" ? chunk.embedding_cf : chunk.embedding;
+      if (Array.isArray(vec) && vec.length > 0) {
+        return vec.length;
+      }
+    }
+    return null;
   }
 
   async recordConversation(record: ConversationRecord): Promise<void> {

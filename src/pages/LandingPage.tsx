@@ -63,8 +63,8 @@ const PIPELINE_NODES: PipelineNode[] = [
     id: "embed",
     step: "04",
     title: "Embeddings",
-    subtitle: "Gemini Embedding-2",
-    detail: "Converts every chunk into dense semantic vectors stored in persistent disk storage.",
+    subtitle: "Dense Semantic Vectors",
+    detail: "Converts every chunk into dense semantic vectors stored in persistent vector storage.",
     icon: Binary,
     accent: "cyan",
   },
@@ -81,7 +81,7 @@ const PIPELINE_NODES: PipelineNode[] = [
     id: "answer",
     step: "06",
     title: "AI Answer",
-    subtitle: "Grounded Gemini output",
+    subtitle: "Grounded AI output",
     detail: "Synthesizes a citation-backed response grounded strictly in the retrieved passages.",
     icon: MessageSquareText,
     accent: "cyan",
@@ -494,8 +494,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                   Transparent End-to-End Architecture
                 </h2>
                 <p className="mt-2.5 text-sm sm:text-base text-[var(--dm-text-muted)] leading-relaxed">
-                  Powered by Node.js, Express, per-page PDF parsing, Gemini Embeddings, durable
-                  PostgreSQL (pgvector) &amp; object storage, and grounded Gemini generation. Compare
+                  Powered by Node.js, Express, per-page PDF parsing, Semantic Embeddings, durable
+                  PostgreSQL (pgvector) &amp; object storage, and grounded LLM generation. Compare
                   RAG vs. ungrounded answers live inside the workspace.
                 </p>
                 <div className="mt-6 grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs text-[var(--dm-text-secondary)]">
@@ -505,7 +505,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
                   </div>
                   <div className="flex items-center gap-2">
                     <Binary className="w-4 h-4 text-blue-700 dark:text-blue-300 shrink-0" />
-                    <span>Gemini Embedding Vectors</span>
+                    <span>Semantic Embedding Vectors</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Cpu className="w-4 h-4 text-cyan-700 dark:text-cyan-300 shrink-0" />
