@@ -95,7 +95,7 @@ export async function askChatQuestion(params: {
     body: JSON.stringify({
       question: params.question,
       document_ids: params.documentIds && params.documentIds.length > 0 ? params.documentIds : undefined,
-      top_k: params.topK ?? 5,
+      top_k: params.topK ?? 3,
     }),
   });
   return parseResponse(res);
@@ -112,7 +112,7 @@ export async function compareRagQuestion(params: {
     body: JSON.stringify({
       question: params.question,
       document_ids: params.documentIds && params.documentIds.length > 0 ? params.documentIds : undefined,
-      top_k: params.topK ?? 5,
+      top_k: params.topK ?? 3,
     }),
   });
   return parseResponse(res);
@@ -129,7 +129,7 @@ export async function inspectRetrievalPipeline(params: {
     body: JSON.stringify({
       question: params.question,
       document_ids: params.documentIds && params.documentIds.length > 0 ? params.documentIds : undefined,
-      top_k: params.topK ?? 5,
+      top_k: params.topK ?? 3,
     }),
   });
   return parseResponse(res);

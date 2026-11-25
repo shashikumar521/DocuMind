@@ -3,6 +3,7 @@ import "dotenv/config";
 import express, { Express, NextFunction, Request, Response } from "express";
 import multer from "multer";
 import {
+  checkAiProviderConnectivity,
   formatAiError,
   generateRagAnswer,
   generateWithoutRagAnswerWithMeta,
@@ -11,7 +12,6 @@ import {
   getActiveEmbeddingModel,
   getCompareTotalBudgetMs,
   isAiConfigured,
-  isCloudflareFallbackAvailable,
   VERCEL_REQUEST_DEADLINE_MS,
 } from "./aiClient.js";
 import {
@@ -64,43 +64,48 @@ export function createApiApp(): Express {
   });
   app.use(express.json({ limit: "4mb" }));
 
-  // Health & diagnostics endpoint
-  app.get("/api/health", async (_req, res) => {
+  // Health & diagnostics endpoint: clearly separates application/database health
+  // from external Cloudflare Workers AI provider connectivity.
+  app.get("/api/health", async (req, res) => {
     const aiProvider = getActiveAiProvider();
-    const chatModel = getActiveChatModel(aiProvider);
-    const embeddingModel = getActiveEmbeddingModel(aiProvider);
-    const aiConfigured = isAiConfigured(aiProvider);
+    const chatModel = getActiveChatModel();
+    const embeddingModel = getActiveEmbeddingModel();
+    const aiConfigured = isAiConfigured();
+    const forceRefresh = req.query.refresh === "1";
+
+    const providerConnectivityPromise = checkAiProviderConnectivity({ forceRefresh });
 
     try {
       await ragEngine.init();
-      const [docs, chunksCount, embeddingDims] = await Promise.all([
+      const [docs, chunksCount, embeddingDims, providerConnectivity] = await Promise.all([
         ragEngine.listDocuments(),
         ragEngine.getTotalChunksCount(),
-        ragEngine.getEmbeddingDimensions(aiProvider),
+        ragEngine.getEmbeddingDimensions(),
+        providerConnectivityPromise,
       ]);
       const indexedDocs = docs.filter((d) => d.status === "Indexed Successfully");
       const storageInfo = ragEngine.getStorageInfo();
 
-      const fallbackReady = isCloudflareFallbackAvailable();
-      const fallbackModel = getActiveChatModel("cloudflare");
+      const overallStatus = providerConnectivity.reachable ? "ok" : "degraded";
 
       res.json({
-        status: "ok",
+        status: overallStatus,
+        app_status: "ok",
+        database_checked: true,
+        database_healthy: true,
         backend: "node-express-rag",
         ai_provider: aiProvider,
         chat_model: chatModel,
+        embedding_model: embeddingModel,
+        fallback_enabled: false,
         ai_configured: aiConfigured,
-        fallback_provider: fallbackReady ? "cloudflare" : null,
-        fallback_configured: fallbackReady,
-        fallback_chat_model: fallbackModel,
+        provider_status: providerConnectivity.status,
+        provider_connectivity: providerConnectivity,
         storage_mode: storageInfo.storage_mode,
         vector_store: storageInfo.vector_store,
         object_storage: storageInfo.object_storage,
         storage_file: storageInfo.storage_label,
-        embedding_model: embeddingModel,
         embedding_dimensions: embeddingDims,
-        gemini_model: chatModel,
-        gemini_configured: aiConfigured,
         documents_count: docs.length,
         indexed_documents_count: indexedDocs.length,
         chunks_count: chunksCount,
@@ -110,22 +115,29 @@ export function createApiApp(): Express {
     } catch (err: unknown) {
       const formatted = formatRouteError(err);
       const storageInfo = ragEngine.getStorageInfo();
-      const fallbackReady = isCloudflareFallbackAvailable();
+      const providerConnectivity = await providerConnectivityPromise.catch(() => ({
+        configured: aiConfigured,
+        checked: false,
+        reachable: false,
+        status: aiConfigured ? ("unreachable" as const) : ("unconfigured" as const),
+      }));
       res.status(formatted.status).json({
         status: "error",
+        app_status: "error",
+        database_checked: true,
+        database_healthy: false,
         detail: formatted.message,
         backend: "node-express-rag",
         ai_provider: aiProvider,
         chat_model: chatModel,
+        embedding_model: embeddingModel,
+        fallback_enabled: false,
         ai_configured: aiConfigured,
-        fallback_provider: fallbackReady ? "cloudflare" : null,
-        fallback_configured: fallbackReady,
-        fallback_chat_model: getActiveChatModel("cloudflare"),
+        provider_status: providerConnectivity.status,
+        provider_connectivity: providerConnectivity,
         storage_mode: storageInfo.storage_mode,
         vector_store: storageInfo.vector_store,
         object_storage: storageInfo.object_storage,
-        gemini_model: chatModel,
-        gemini_configured: aiConfigured,
       });
     }
   });
@@ -273,15 +285,13 @@ export function createApiApp(): Express {
     const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
 
     try {
-      const provider = getActiveAiProvider();
       const retrievalStart = Date.now();
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider, {
+      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, {
         deadlineMs,
         requestId,
       });
       const retrievalDurationMs = Date.now() - retrievalStart;
       const ragResult = await generateRagAnswer(question, chunks, {
-        provider,
         deadlineMs,
         requestId,
         endpoint: "/api/chat/ask",
@@ -292,7 +302,6 @@ export function createApiApp(): Express {
         question,
         ai_provider: ragResult.provider,
         model: ragResult.model,
-        fallback_used: ragResult.fallbackUsed,
         answer: ragResult.answer,
         sources: chunks,
         prompt_preview: ragResult.promptPreview,
@@ -323,12 +332,9 @@ export function createApiApp(): Express {
     const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
 
     try {
-      const provider = getActiveAiProvider();
-      const totalBudgetMs = getCompareTotalBudgetMs(provider);
+      const totalBudgetMs = getCompareTotalBudgetMs();
       const retrievalStart = Date.now();
-      // Retrieve chunks first (cached for repeated queries) so we don't waste
-      // a baseline generation call if embedding/retrieval fails or rate-limits.
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider, {
+      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, {
         deadlineMs,
         requestId,
       });
@@ -336,7 +342,6 @@ export function createApiApp(): Express {
       const [withoutRagResult, withRagResult] = await Promise.all([
         generateWithoutRagAnswerWithMeta(question, {
           totalBudgetMs,
-          provider,
           deadlineMs,
           requestId,
           endpoint: req.path,
@@ -344,7 +349,6 @@ export function createApiApp(): Express {
         }),
         generateRagAnswer(question, chunks, {
           totalBudgetMs,
-          provider,
           deadlineMs,
           requestId,
           endpoint: req.path,
@@ -355,18 +359,15 @@ export function createApiApp(): Express {
         question,
         ai_provider: withRagResult.provider,
         model: withRagResult.model,
-        fallback_used: withRagResult.fallbackUsed || withoutRagResult.fallbackUsed,
         without_rag: {
           answer: withoutRagResult.answer,
           ai_provider: withoutRagResult.provider,
           model: withoutRagResult.model,
-          fallback_used: withoutRagResult.fallbackUsed,
         },
         with_rag: {
           answer: withRagResult.answer,
           ai_provider: withRagResult.provider,
           model: withRagResult.model,
-          fallback_used: withRagResult.fallbackUsed,
           sources: chunks,
           prompt_preview: withRagResult.promptPreview,
         },
@@ -400,19 +401,17 @@ export function createApiApp(): Express {
     const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
 
     try {
-      const provider = getActiveAiProvider();
       const retrievalStart = Date.now();
       const [chunks, embeddingDims, totalChunks] = await Promise.all([
-        ragEngine.retrieveChunks(question, topK, documentIds, provider, {
+        ragEngine.retrieveChunks(question, topK, documentIds, {
           deadlineMs,
           requestId,
         }),
-        ragEngine.getEmbeddingDimensions(provider),
+        ragEngine.getEmbeddingDimensions(),
         ragEngine.getTotalChunksCount(),
       ]);
       const retrievalDurationMs = Date.now() - retrievalStart;
       const ragResult = await generateRagAnswer(question, chunks, {
-        provider,
         deadlineMs,
         requestId,
         endpoint: "/api/retrieval/inspect",
@@ -425,8 +424,7 @@ export function createApiApp(): Express {
         answer: ragResult.answer,
         ai_provider: ragResult.provider,
         model: ragResult.model,
-        fallback_used: ragResult.fallbackUsed,
-        embedding_model: getActiveEmbeddingModel(provider),
+        embedding_model: getActiveEmbeddingModel(),
         embedding_dimensions: embeddingDims,
         total_chunks_indexed: totalChunks,
         top_k: topK,

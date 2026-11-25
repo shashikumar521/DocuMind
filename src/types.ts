@@ -61,20 +61,17 @@ export interface DashboardStats {
 
 export interface CompareResponse {
   question: string;
-  ai_provider?: "gemini" | "cloudflare";
+  ai_provider?: "cloudflare";
   model?: string;
-  fallback_used?: boolean;
   without_rag: {
     answer: string;
-    ai_provider?: "gemini" | "cloudflare";
+    ai_provider?: "cloudflare";
     model?: string;
-    fallback_used?: boolean;
   };
   with_rag: {
     answer: string;
-    ai_provider?: "gemini" | "cloudflare";
+    ai_provider?: "cloudflare";
     model?: string;
-    fallback_used?: boolean;
     sources: RetrievedChunk[];
     prompt_preview: string;
   };
@@ -85,9 +82,8 @@ export interface RetrievalInspectResponse {
   chunks: RetrievedChunk[];
   prompt_preview: string;
   answer: string;
-  ai_provider?: "gemini" | "cloudflare";
+  ai_provider?: "cloudflare";
   model?: string;
-  fallback_used?: boolean;
   embedding_model?: string;
   embedding_dimensions?: number | null;
   total_chunks_indexed?: number;
@@ -96,20 +92,28 @@ export interface RetrievalInspectResponse {
 
 export interface HealthStatus {
   status: string;
+  app_status?: "ok" | "error";
+  database_checked?: boolean;
+  database_healthy?: boolean;
   backend: string;
-  ai_provider?: "gemini" | "cloudflare";
-  chat_model?: string;
-  ai_configured?: boolean;
-  fallback_provider?: "cloudflare" | null;
-  fallback_configured?: boolean;
-  fallback_chat_model?: string;
+  ai_provider: "cloudflare";
+  chat_model: string;
+  embedding_model: string;
+  fallback_enabled: boolean;
+  ai_configured: boolean;
+  provider_status?: "reachable" | "unreachable" | "unconfigured";
+  provider_connectivity?: {
+    configured: boolean;
+    checked: boolean;
+    reachable: boolean;
+    status: "reachable" | "unreachable" | "unconfigured";
+    http_status?: number;
+    detail?: string;
+  };
   storage_mode?: string;
   vector_store: string;
   object_storage?: string;
-  embedding_model: string;
   embedding_dimensions: number | null;
-  gemini_model: string;
-  gemini_configured: boolean;
   documents_count: number;
   indexed_documents_count: number;
   chunks_count: number;

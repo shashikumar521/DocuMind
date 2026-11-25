@@ -1,4 +1,13 @@
-import type { RetrievedChunkRef } from "./geminiClient.js";
+export interface RetrievedChunkRef {
+  rank: number;
+  chunk_id: string;
+  document_id: string;
+  filename: string;
+  page_number: number;
+  text: string;
+  distance: number;
+  similarity: number;
+}
 
 export const DEFAULT_RAG_TOP_K = 3;
 export const RAG_MAX_CHUNK_CHARS = 1_800;
@@ -207,7 +216,6 @@ export function buildOptimizedRagPrompt(
 export function redactSecrets(message: string): string {
   let sanitized = String(message ?? "");
   const secretEnvKeys = [
-    "GEMINI_API_KEY",
     "CLOUDFLARE_API_TOKEN",
     "CLOUDFLARE_ACCOUNT_ID",
     "DATABASE_URL",
@@ -227,7 +235,6 @@ export function redactSecrets(message: string): string {
 
   return sanitized
     .replace(/([?&]key=)[^&\s'"`]+/gi, "$1***")
-    .replace(/\bAIza[0-9A-Za-z_-]{16,}\b/g, "AIza***")
     .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer ***")
     .replace(/(https?:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/)[^/\s]+/gi, "$1***")
     .replace(/postgres(?:ql)?:\/\/[^\s'"`]+@/gi, "postgresql://***@");

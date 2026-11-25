@@ -8,12 +8,15 @@ import {
   getCloudflareExpectedEmbeddingDimensions,
   isCloudflareConfigured,
 } from "../server/cloudflareClient.js";
+import { extractPdfPagesAndChunks } from "../server/ragEngine.js";
 import {
   ChunkMigrationStats,
   DatabaseIdentity,
+  DocumentRecord,
   isKnownProductionTarget,
   parseDatabaseTargetInfo,
   PostgresBlobStorage,
+  StoredChunk,
 } from "../server/storage.js";
 
 export interface BackfillCliArgs {
@@ -34,6 +37,17 @@ export interface ReembedCloudflareStorage {
   saveCloudflareChunkEmbeddings(
     items: Array<{ chunk_id: string; embedding_cf: number[]; embedding_cf_model: string }>
   ): Promise<number>;
+  fetchDocumentsWithMissingChunks?(limit: number): Promise<DocumentRecord[]>;
+  getPdfBinary?(doc: DocumentRecord): Promise<{ buffer: Buffer; contentType: string } | null>;
+  insertChunks?(
+    chunks: StoredChunk[],
+    options?: { provider?: "cloudflare"; embeddingModel?: string }
+  ): Promise<void>;
+  updateDocument?(
+    documentId: string,
+    patch: Partial<Pick<DocumentRecord, "status" | "progress" | "pages" | "chunks_count" | "error_message">>
+  ): Promise<DocumentRecord | null>;
+  markCompleteDocumentsIndexed?(): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -178,7 +192,6 @@ function validatePreConnectionSafety(
       }
     }
   } else {
-    // Dry-run mode still enforces Preview isolation when explicitly in preview context
     if (vercelEnv === "preview" && !args.allowPreview) {
       throw new Error(
         "Refusing database inspection in VERCEL_ENV=preview without --allow-preview."
@@ -271,8 +284,8 @@ export async function runReembedCloudflare(
     const model = getCloudflareEmbeddingModel();
     const expectedDims = getCloudflareExpectedEmbeddingDimensions();
 
-    log("DocuMind Cloudflare Re-embedding Status");
-    log("---------------------------------------");
+    log("DocuMind Cloudflare Re-indexing & Embedding Status");
+    log("------------------------------------------------");
     log(`Database host           : ${identity.hostname}`);
     log(`Database name           : ${identity.serverDatabaseName}`);
     log(`PostgreSQL version      : ${identity.serverVersion}`);
@@ -283,7 +296,7 @@ export async function runReembedCloudflare(
     log(`embedding_cf column     : ${stats.has_embedding_cf_column}`);
     log(`embedding nullable      : ${stats.embedding_nullable}`);
     log(`Total chunks            : ${stats.total_chunks}`);
-    log(`Chunks with Gemini vec  : ${stats.gemini_chunks}`);
+    log(`Legacy vector chunks    : ${stats.legacy_chunks}`);
     log(`Chunks with CF vec      : ${stats.cloudflare_chunks}`);
     log(`Chunks pending CF embed : ${stats.missing_cloudflare_chunks}`);
 
@@ -309,13 +322,14 @@ export async function runReembedCloudflare(
 
     if (targetEnv === "production") {
       log(
-        `\nWARNING: Executing PRODUCTION backfill writes on ${identity.hostname} (database: ${identity.serverDatabaseName}, PostgreSQL ${identity.serverVersion}). Existing Gemini embeddings and chunk text will be preserved.`
+        `\nWARNING: Executing PRODUCTION backfill writes on ${identity.hostname} (database: ${identity.serverDatabaseName}, PostgreSQL ${identity.serverVersion}). Existing documents, PDFs, and chunk text will be preserved.`
       );
     }
 
     let totalUpdated = 0;
     let batchNumber = 0;
 
+    // 1. Backfill existing chunks missing 1,024-d Cloudflare vectors
     while (true) {
       const pending = await storage.fetchChunksNeedingCloudflareEmbedding(args.batchSize);
       if (pending.length === 0) {
@@ -351,11 +365,92 @@ export async function runReembedCloudflare(
       );
     }
 
+    // 2. Re-index any documents with zero stored chunks using their stored PDF files
+    if (
+      storage.fetchDocumentsWithMissingChunks &&
+      storage.getPdfBinary &&
+      storage.insertChunks &&
+      storage.updateDocument
+    ) {
+      const processedDocIds = new Set<string>();
+      while (true) {
+        const docsMissingChunks = await storage.fetchDocumentsWithMissingChunks(args.batchSize);
+        const nextDocs = docsMissingChunks.filter((d) => !processedDocIds.has(d.id));
+        if (nextDocs.length === 0) break;
+
+        for (const doc of nextDocs) {
+          processedDocIds.add(doc.id);
+          const binary = await storage.getPdfBinary(doc);
+          if (!binary) {
+            log(`Skipping document ${doc.id} (${doc.filename}): no stored PDF binary available.`);
+            continue;
+          }
+
+          const { totalPages, chunks: rawChunks } = await extractPdfPagesAndChunks(
+            binary.buffer,
+            doc.id,
+            doc.filename
+          );
+
+          const storedChunks: StoredChunk[] = [];
+          for (let offset = 0; offset < rawChunks.length; offset += args.batchSize) {
+            const slice = rawChunks.slice(offset, offset + args.batchSize);
+            const vecs = await embedFn(slice.map((c) => c.text));
+            if (vecs.length !== slice.length) {
+              throw new Error(
+                `Document ${doc.id} vector count mismatch: expected ${slice.length}, got ${vecs.length}.`
+              );
+            }
+            for (let i = 0; i < slice.length; i++) {
+              const vec = vecs[i];
+              if (!Array.isArray(vec) || vec.length !== expectedDims) {
+                throw new Error(
+                  `Chunk ${slice[i].chunk_id} received ${vec?.length ?? 0} dimensions instead of ${expectedDims}.`
+                );
+              }
+              storedChunks.push({
+                ...slice[i],
+                embedding: null,
+                embedding_model: null,
+                embedding_cf: vec,
+                embedding_cf_model: model,
+              });
+            }
+          }
+
+          await storage.insertChunks(storedChunks, {
+            provider: "cloudflare",
+            embeddingModel: model,
+          });
+          // Never mark document indexed until all Cloudflare embeddings are stored.
+          await storage.updateDocument(doc.id, {
+            status: "Indexed Successfully",
+            progress: 100,
+            pages: totalPages,
+            chunks_count: storedChunks.length,
+            error_message: null,
+          });
+          totalUpdated += storedChunks.length;
+          log(
+            `Re-indexed document ${doc.id} (${doc.filename}) from stored PDF: ${storedChunks.length} chunks (${expectedDims}d).`
+          );
+        }
+      }
+    }
+
+    // 3. Ensure document status is marked indexed only once every chunk has valid Cloudflare vectors
+    if (storage.markCompleteDocumentsIndexed) {
+      const finalizedDocs = await storage.markCompleteDocumentsIndexed();
+      if (finalizedDocs > 0) {
+        log(`Marked ${finalizedDocs} document(s) 'Indexed Successfully' after verifying complete Cloudflare vectors.`);
+      }
+    }
+
     const finalStats = await storage.getChunkMigrationStats();
     log("\nBackfill Complete");
     log("-----------------");
     log(`Total chunks            : ${finalStats.total_chunks}`);
-    log(`Chunks with Gemini vec  : ${finalStats.gemini_chunks}`);
+    log(`Legacy vector chunks    : ${finalStats.legacy_chunks}`);
     log(`Chunks with CF vec      : ${finalStats.cloudflare_chunks}`);
     log(`Remaining pending CF    : ${finalStats.missing_cloudflare_chunks}`);
     return finalStats;

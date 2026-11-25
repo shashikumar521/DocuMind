@@ -15,27 +15,21 @@
 -- SELECT status, COUNT(*) FROM documind_documents GROUP BY status;
 -- SELECT
 --   COUNT(*) AS total_chunks,
---   COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS chunks_with_gemini_vec,
+--   COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS chunks_with_legacy_vec,
 --   COUNT(*) FILTER (WHERE text IS NOT NULL AND length(trim(text)) > 0) AS chunks_with_text,
 --   MIN(vector_dims(embedding)) AS min_dims,
 --   MAX(vector_dims(embedding)) AS max_dims
 -- FROM documind_chunks;
 
 -- ----------------------------------------------------------------------------
--- SECTION B: IDEMPOTENT ADDITIVE SCHEMA MIGRATION (Preserves all Gemini data)
+-- SECTION B: IDEMPOTENT ADDITIVE SCHEMA MIGRATION (Preserves all existing rows)
 -- ----------------------------------------------------------------------------
 BEGIN;
 
 ALTER TABLE documind_chunks
   ADD COLUMN IF NOT EXISTS embedding_model TEXT;
 
-UPDATE documind_chunks
-SET embedding_model = 'gemini-embedding-2'
-WHERE embedding IS NOT NULL
-  AND embedding_model IS NULL;
-
--- Allow new Cloudflare-only uploads to store chunks without requiring Gemini calls.
--- All pre-existing Gemini vectors in `embedding` remain untouched for rollback.
+-- Allow Cloudflare-only uploads to store chunks in embedding_cf without populating legacy `embedding`.
 ALTER TABLE documind_chunks
   ALTER COLUMN embedding DROP NOT NULL;
 
@@ -64,20 +58,17 @@ COMMIT;
 --
 -- SELECT
 --   COUNT(*) AS total_chunks,
---   COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS gemini_chunks,
+--   COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS legacy_chunks,
 --   COUNT(*) FILTER (WHERE embedding_cf IS NOT NULL) AS cloudflare_chunks,
 --   COUNT(*) FILTER (WHERE embedding_cf IS NULL) AS pending_cloudflare_chunks
 -- FROM documind_chunks;
 
 -- ----------------------------------------------------------------------------
--- SECTION E: FAILURE RECOVERY / ROLLBACK NOTES
+-- SECTION E: FAILURE RECOVERY NOTES
 -- ----------------------------------------------------------------------------
 -- 1. If Section B fails inside BEGIN...COMMIT, PostgreSQL automatically rolls back
 --    the transaction and leaves `documind_chunks` unchanged.
--- 2. To roll back application traffic at any point:
---    a) If new documents were uploaded under AI_PROVIDER=cloudflare, run:
---       npx tsx scripts/reembed-gemini.ts --execute
---       so every chunk has `embedding` populated.
---    b) Set AI_PROVIDER=gemini in Vercel Environment Variables and redeploy.
--- 3. Do NOT drop `embedding` or `embedding_cf` until the target provider has been
---    verified in Production.
+-- 2. Re-indexing via `npm run reembed:cloudflare` is resumable and idempotent:
+--    re-run with `--execute` to finish any remaining rows where `embedding_cf IS NULL`.
+-- 3. Do NOT drop `embedding` or `embedding_cf` columns until Production verification
+--    confirms 100% of active chunks have 1,024-d `@cf/baai/bge-m3` vectors.

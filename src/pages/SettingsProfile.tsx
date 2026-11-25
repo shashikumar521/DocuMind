@@ -1,11 +1,11 @@
-import React, { useState } from "react";
-import { Monitor, Moon, Sun, Trash2 } from "lucide-react";
-import { clearChatHistoryApi } from "../api";
+import React, { useEffect, useState } from "react";
+import { Cpu, Monitor, Moon, Sun, Trash2 } from "lucide-react";
+import { clearChatHistoryApi, fetchHealth } from "../api";
 import { AppShell, AvatarBadge } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DocuMindLogo } from "../components/DocuMindLogo";
 import { useToast } from "../components/ToastProvider";
-import { RoutePage, ThemeMode, UserPreferences } from "../types";
+import { HealthStatus, RoutePage, ThemeMode, UserPreferences } from "../types";
 
 interface SettingsProfileProps {
   onNavigate: (page: RoutePage) => void;
@@ -20,7 +20,14 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
 }) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const { pushToast } = useToast();
+
+  useEffect(() => {
+    fetchHealth()
+      .then(setHealth)
+      .catch(() => {});
+  }, []);
 
   const handleClearHistory = async () => {
     setClearing(true);
@@ -194,6 +201,35 @@ export const SettingsProfile: React.FC<SettingsProfileProps> = ({
                 <option value={8} className="bg-[var(--dm-surface)] text-[var(--dm-text)]">Top 8 chunks</option>
               </select>
             </label>
+          </div>
+        </section>
+
+        {/* AI Provider Runtime */}
+        <section className="dm-card p-6 flex flex-col gap-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <Cpu className="w-4 h-4 text-cyan-700 dark:text-cyan-300" />
+              <h2 className="font-display text-base font-semibold text-[var(--dm-text)]">
+                AI Engine Configuration
+              </h2>
+            </div>
+            <span className="font-mono text-xs text-cyan-700 dark:text-cyan-300">
+              Cloudflare Workers AI
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            <div className="p-3.5 rounded-xl bg-[var(--dm-bg-secondary)]/70 border border-[var(--dm-border)]">
+              <span className="text-[var(--dm-text-muted)] block mb-1">Chat Model</span>
+              <span className="font-mono font-semibold text-[var(--dm-text)] break-all">
+                {health?.chat_model || "@cf/meta/llama-4-scout-17b-16e-instruct"}
+              </span>
+            </div>
+            <div className="p-3.5 rounded-xl bg-[var(--dm-bg-secondary)]/70 border border-[var(--dm-border)]">
+              <span className="text-[var(--dm-text-muted)] block mb-1">Embedding Model</span>
+              <span className="font-mono font-semibold text-[var(--dm-text)] break-all">
+                {health?.embedding_model || "@cf/baai/bge-m3"} ({health?.embedding_dimensions ?? 1024}d)
+              </span>
+            </div>
           </div>
         </section>
 

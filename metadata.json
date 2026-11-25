@@ -1,6 +1,6 @@
 {
   "name": "DocuMind",
-  "description": "AI-powered document question-answering application using Retrieval-Augmented Generation (RAG), vector embeddings, and Gemini AI.",
+  "description": "AI-powered document question-answering application using Retrieval-Augmented Generation (RAG), pgvector embeddings, and Cloudflare Workers AI.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

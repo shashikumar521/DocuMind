@@ -2,13 +2,9 @@ import crypto from "crypto";
 import path from "path";
 import { extractText, getDocumentProxy } from "unpdf";
 import {
-  AiProvider,
   embedQuery,
   generateEmbeddings,
-  getActiveAiProvider,
   getActiveEmbeddingModel,
-  isCloudflareFallbackAvailable,
-  isFallbackEligibleGeminiError,
   RetrievedChunkRef,
 } from "./aiClient.js";
 import { DEFAULT_RAG_TOP_K } from "./ragPrompt.js";
@@ -43,7 +39,7 @@ function tokenizeWords(text: string): string[] {
   return text.trim().split(/\s+/).filter(Boolean);
 }
 
-function chunkPageText(
+export function chunkPageText(
   text: string,
   pageNumber: number,
   documentId: string,
@@ -75,6 +71,52 @@ function chunkPageText(
     idx += step;
   }
   return result;
+}
+
+export async function extractPdfPagesAndChunks(
+  buffer: Buffer,
+  documentId: string,
+  filename: string
+): Promise<{ totalPages: number; chunks: Omit<StoredChunk, "embedding">[] }> {
+  const pdf = await getDocumentProxy(new Uint8Array(buffer), { verbosity: 0 });
+  let extracted: { totalPages: number; text: string[] };
+  try {
+    extracted = await extractText(pdf, { mergePages: false });
+  } finally {
+    await pdf.loadingTask?.destroy?.();
+  }
+
+  const totalPages = extracted.totalPages || 0;
+  const pageTexts = Array.isArray(extracted.text) ? extracted.text : [];
+
+  if (totalPages === 0) {
+    throw new Error("The uploaded PDF contains zero pages.");
+  }
+
+  const nonEmptyPages: { pageNum: number; text: string }[] = [];
+  for (let i = 0; i < pageTexts.length; i++) {
+    const cleaned = (pageTexts[i] ?? "").replace(/\s+/g, " ").trim();
+    if (cleaned.length > 0) {
+      nonEmptyPages.push({ pageNum: i + 1, text: cleaned });
+    }
+  }
+
+  if (nonEmptyPages.length === 0) {
+    throw new Error(
+      "No extractable text found in PDF. Empty or image-only scanned PDFs cannot be indexed without OCR."
+    );
+  }
+
+  const chunks: Omit<StoredChunk, "embedding">[] = [];
+  for (const page of nonEmptyPages) {
+    chunks.push(...chunkPageText(page.text, page.pageNum, documentId, filename));
+  }
+
+  if (chunks.length === 0) {
+    throw new Error("No valid text chunks could be created from the PDF.");
+  }
+
+  return { totalPages, chunks };
 }
 
 class RagEngine {
@@ -112,8 +154,8 @@ class RagEngine {
     return this.storage.getTotalChunksCount();
   }
 
-  async getEmbeddingDimensions(provider: AiProvider = getActiveAiProvider()): Promise<number | null> {
-    return this.storage.getEmbeddingDimensions(provider);
+  async getEmbeddingDimensions(): Promise<number | null> {
+    return this.storage.getEmbeddingDimensions();
   }
 
   private async updateStatus(
@@ -178,73 +220,37 @@ class RagEngine {
 
     try {
       await this.updateStatus(documentId, "Extracting Text", 25);
-      const pdf = await getDocumentProxy(new Uint8Array(buffer), { verbosity: 0 });
-      let extracted: { totalPages: number; text: string[] };
-      try {
-        extracted = await extractText(pdf, { mergePages: false });
-      } finally {
-        await pdf.loadingTask?.destroy?.();
-      }
-      const totalPages = extracted.totalPages || 0;
-      const pageTexts = Array.isArray(extracted.text) ? extracted.text : [];
+      const { totalPages, chunks: rawChunks } = await extractPdfPagesAndChunks(
+        buffer,
+        documentId,
+        filename
+      );
 
-      if (totalPages === 0) {
-        throw new Error("The uploaded PDF contains zero pages.");
-      }
+      await this.updateStatus(documentId, "Chunking", 50, { pages: totalPages });
 
-      const nonEmptyPages: { pageNum: number; text: string }[] = [];
-      for (let i = 0; i < pageTexts.length; i++) {
-        const cleaned = (pageTexts[i] ?? "").replace(/\s+/g, " ").trim();
-        if (cleaned.length > 0) {
-          nonEmptyPages.push({ pageNum: i + 1, text: cleaned });
-        }
-      }
-
-      if (nonEmptyPages.length === 0) {
+      await this.updateStatus(documentId, "Generating Embeddings", 75);
+      const activeEmbeddingModel = getActiveEmbeddingModel();
+      const vectors = await generateEmbeddings(rawChunks.map((c) => c.text));
+      if (vectors.length !== rawChunks.length) {
         throw new Error(
-          "No extractable text found in PDF. Empty or image-only scanned PDFs cannot be indexed without OCR."
+          `Embedding batch count mismatch: expected ${rawChunks.length}, received ${vectors.length}.`
         );
       }
 
-      await this.updateStatus(documentId, "Chunking", 50, { pages: totalPages });
-      const rawChunks: Omit<StoredChunk, "embedding">[] = [];
-      for (const page of nonEmptyPages) {
-        rawChunks.push(...chunkPageText(page.text, page.pageNum, documentId, filename));
-      }
-
-      if (rawChunks.length === 0) {
-        throw new Error("No valid text chunks could be created from the PDF.");
-      }
-
-      await this.updateStatus(documentId, "Generating Embeddings", 75);
-      const activeProvider = getActiveAiProvider();
-      const activeEmbeddingModel = getActiveEmbeddingModel(activeProvider);
-      const vectors = await generateEmbeddings(
-        rawChunks.map((c) => c.text),
-        activeProvider
-      );
-
       await this.updateStatus(documentId, "Indexing Vectors", 90);
-      const storedChunks: StoredChunk[] = rawChunks.map((c, idx) =>
-        activeProvider === "cloudflare"
-          ? {
-              ...c,
-              embedding: null,
-              embedding_model: null,
-              embedding_cf: vectors[idx],
-              embedding_cf_model: activeEmbeddingModel,
-            }
-          : {
-              ...c,
-              embedding: vectors[idx],
-              embedding_model: activeEmbeddingModel,
-            }
-      );
+      const storedChunks: StoredChunk[] = rawChunks.map((c, idx) => ({
+        ...c,
+        embedding: null,
+        embedding_model: null,
+        embedding_cf: vectors[idx],
+        embedding_cf_model: activeEmbeddingModel,
+      }));
       await this.storage.insertChunks(storedChunks, {
-        provider: activeProvider,
+        provider: "cloudflare",
         embeddingModel: activeEmbeddingModel,
       });
 
+      // Only mark indexed after Cloudflare embeddings are durably persisted.
       await this.updateStatus(documentId, "Indexed Successfully", 100, {
         pages: totalPages,
         chunks_count: storedChunks.length,
@@ -285,63 +291,28 @@ class RagEngine {
     question: string,
     topK = DEFAULT_RAG_TOP_K,
     documentIds?: string[],
-    provider: AiProvider = getActiveAiProvider(),
     options: { deadlineMs?: number; requestId?: string } = {}
   ): Promise<RetrievedChunkRef[]> {
-    const embeddingModel = getActiveEmbeddingModel(provider);
+    const embeddingModel = getActiveEmbeddingModel();
     const embedBudgetOptions =
       options.deadlineMs !== undefined
         ? { deadlineMs: Math.min(options.deadlineMs, Date.now() + 12_000) }
         : undefined;
-    try {
-      const [, queryEmbedding] = await Promise.all([
-        this.storage.init(),
-        embedQuery(question, provider, embedBudgetOptions),
-      ]);
-      const chunks = await this.storage.searchSimilarChunks(queryEmbedding, topK, documentIds, {
-        provider,
-        embeddingModel,
-      });
-      console.info(
-        `[ai] Retrieved chunks=${chunks.length} topK=${topK} via embedding provider=${provider} model=${embeddingModel}${options.requestId ? ` requestId=${options.requestId}` : ""}`
-      );
-      return chunks;
-    } catch (primaryErr: unknown) {
-      if (provider !== "gemini" || !isCloudflareFallbackAvailable()) {
-        throw primaryErr;
-      }
-      const check = isFallbackEligibleGeminiError(primaryErr);
-      if (!check.eligible) {
-        throw primaryErr;
-      }
-      if (options.deadlineMs !== undefined && options.deadlineMs - Date.now() <= 2_000) {
-        throw primaryErr;
-      }
 
-      const cfDims = await this.storage.getEmbeddingDimensions("cloudflare").catch(() => null);
-      if (cfDims === null) {
-        console.warn(
-          `[ai] Primary embedding provider=gemini failed (reason=${check.reason}, status=${check.status}); Cloudflare retrieval fallback skipped because storage has no 1024d embedding_cf vectors yet.`
-        );
-        throw primaryErr;
-      }
+    const [, queryEmbedding] = await Promise.all([
+      this.storage.init(),
+      embedQuery(question, embedBudgetOptions),
+    ]);
 
-      const cfModel = getActiveEmbeddingModel("cloudflare");
-      console.warn(
-        `[ai] Primary embedding provider=gemini failed (reason=${check.reason}, status=${check.status}); falling back retrieval to provider=cloudflare model=${cfModel}.`
-      );
-      const cfQueryEmbedding = await embedQuery(question, "cloudflare", {
-        deadlineMs: options.deadlineMs,
-      });
-      const chunks = await this.storage.searchSimilarChunks(cfQueryEmbedding, topK, documentIds, {
-        provider: "cloudflare",
-        embeddingModel: cfModel,
-      });
-      console.info(
-        `[ai] Retrieved chunks=${chunks.length} topK=${topK} via fallback embedding provider=cloudflare model=${cfModel}${options.requestId ? ` requestId=${options.requestId}` : ""}`
-      );
-      return chunks;
-    }
+    const chunks = await this.storage.searchSimilarChunks(queryEmbedding, topK, documentIds, {
+      provider: "cloudflare",
+      embeddingModel,
+    });
+
+    console.info(
+      `[ai] Retrieved chunks=${chunks.length} topK=${topK} via provider=cloudflare model=${embeddingModel}${options.requestId ? ` requestId=${options.requestId}` : ""}`
+    );
+    return chunks;
   }
 
   async recordQuestion(

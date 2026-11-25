@@ -255,7 +255,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
             <div>
               <span className="text-[var(--dm-text-muted)] block">Generation Model</span>
               <span className="font-mono font-semibold text-blue-700 dark:text-blue-300">
-                {result?.model || health?.chat_model || health?.gemini_model || "—"}
+                {result?.model || health?.chat_model || "@cf/meta/llama-4-scout-17b-16e-instruct"}
               </span>
             </div>
             <div>
@@ -267,7 +267,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
           </div>
         </section>
 
-        {/* Two-Column Results: Retrieved Chunks & Prompt + Gemini Output */}
+        {/* Two-Column Results: Retrieved Chunks & Prompt + Cloudflare Workers AI Output */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Retrieved Chunks */}
           <section className="lg:col-span-7 flex flex-col gap-4">
@@ -344,7 +344,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
             )}
           </section>
 
-          {/* Prompt Payload & Gemini Synthesis */}
+          {/* Prompt Payload & Cloudflare Workers AI Synthesis */}
           <section className="lg:col-span-5 flex flex-col gap-4">
             <div className="dm-card p-5 flex flex-col gap-3">
               <div className="flex items-center justify-between text-xs">
@@ -366,7 +366,7 @@ export const RetrievalSources: React.FC<RetrievalSourcesProps> = ({
                   Generated Answer
                 </h2>
                 <span className="font-mono text-cyan-700 dark:text-cyan-300">
-                  {result?.model || health?.chat_model || health?.gemini_model || "—"}
+                  {result?.model || health?.chat_model || "@cf/meta/llama-4-scout-17b-16e-instruct"}
                 </span>
               </div>
               {loading ? (

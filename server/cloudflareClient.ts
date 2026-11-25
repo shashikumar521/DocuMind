@@ -1,9 +1,11 @@
-import { RetrievedChunkRef } from "./geminiClient.js";
 import {
   buildOptimizedRagPrompt,
   RAG_MAX_OUTPUT_TOKENS,
   redactSecrets,
+  RetrievedChunkRef,
 } from "./ragPrompt.js";
+
+export type { RetrievedChunkRef };
 
 export const CLOUDFLARE_CHAT_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
 export const CLOUDFLARE_EMBEDDING_MODEL = "@cf/baai/bge-m3";
@@ -765,12 +767,110 @@ function writeTtlCache<T>(
   cache.set(key, { value, expiresAt: Date.now() + ttlMs });
 }
 
+export interface CloudflareConnectivityStatus {
+  configured: boolean;
+  checked: boolean;
+  reachable: boolean;
+  status: "reachable" | "unreachable" | "unconfigured";
+  http_status?: number;
+  detail?: string;
+}
+
+const CONNECTIVITY_CACHE_TTL_MS = 15_000;
+let connectivityCache: { value: CloudflareConnectivityStatus; expiresAt: number } | null = null;
+
 export function clearCloudflareCachesForTest(): void {
   queryEmbeddingCache.clear();
   inFlightQueryEmbeddings.clear();
   noRagAnswerCache.clear();
   inFlightNoRagAnswers.clear();
   inFlightRagAnswers.clear();
+  connectivityCache = null;
+}
+
+export async function checkCloudflareConnectivity(
+  options: { timeoutMs?: number; forceRefresh?: boolean } = {}
+): Promise<CloudflareConnectivityStatus> {
+  if (!isCloudflareConfigured()) {
+    return {
+      configured: false,
+      checked: false,
+      reachable: false,
+      status: "unconfigured",
+      detail: "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are not configured.",
+    };
+  }
+
+  if (!testFetchOverride && !options.forceRefresh && connectivityCache && Date.now() < connectivityCache.expiresAt) {
+    return connectivityCache.value;
+  }
+
+  const { accountId, apiToken } = getCloudflareCredentials();
+  const timeoutMs = options.timeoutMs ?? 2_500;
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    const timeoutErr = new Error(`Cloudflare Workers AI connectivity check timed out after ${timeoutMs}ms.`);
+    timeoutErr.name = "AbortError";
+    controller.abort(timeoutErr);
+  }, timeoutMs);
+
+  try {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/models/search?per_page=1`;
+    const response = await getFetchImpl()(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+      },
+      signal: controller.signal,
+    });
+    const bodyText = await response.text().catch(() => "");
+    let result: CloudflareConnectivityStatus;
+    if (response.ok) {
+      result = {
+        configured: true,
+        checked: true,
+        reachable: true,
+        status: "reachable",
+        http_status: response.status,
+      };
+    } else {
+      const parsed = parseCloudflareErrorBody(bodyText);
+      const formatted = formatCloudflareError({
+        status: response.status,
+        bodyText,
+        cfCodes: parsed.cfCodes,
+        message: parsed.message || `Cloudflare HTTP ${response.status}`,
+      });
+      result = {
+        configured: true,
+        checked: true,
+        reachable: false,
+        status: "unreachable",
+        http_status: formatted.status,
+        detail: formatted.message,
+      };
+    }
+    if (!testFetchOverride) {
+      connectivityCache = { value: result, expiresAt: Date.now() + CONNECTIVITY_CACHE_TTL_MS };
+    }
+    return result;
+  } catch (err: unknown) {
+    const formatted = formatCloudflareError(err);
+    const result: CloudflareConnectivityStatus = {
+      configured: true,
+      checked: true,
+      reachable: false,
+      status: "unreachable",
+      http_status: formatted.status,
+      detail: formatted.message,
+    };
+    if (!testFetchOverride) {
+      connectivityCache = { value: result, expiresAt: Date.now() + CONNECTIVITY_CACHE_TTL_MS };
+    }
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 interface OpenAiEmbeddingResponse {

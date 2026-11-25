@@ -60,8 +60,8 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
   };
 
   const activeModel =
-    result?.model || health?.chat_model || health?.gemini_model || "gemini-3.1-flash-lite";
-  const providerLabel = health?.ai_provider === "cloudflare" ? "Cloudflare AI" : "AI";
+    result?.model || health?.chat_model || "@cf/meta/llama-4-scout-17b-16e-instruct";
+  const providerLabel = "Cloudflare Workers AI";
 
   return (
     <AppShell

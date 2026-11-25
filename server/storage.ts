@@ -4,7 +4,7 @@ import fs from "fs";
 import path from "path";
 import { Pool } from "pg";
 import type { AiProvider } from "./aiClient.js";
-import { RetrievedChunkRef } from "./geminiClient.js";
+import type { RetrievedChunkRef } from "./ragPrompt.js";
 
 export type ProcessingStatus =
   | "Uploaded"
@@ -45,10 +45,9 @@ export interface StoredChunk {
 
 export interface ChunkMigrationStats {
   total_chunks: number;
-  gemini_chunks: number;
+  legacy_chunks: number;
   cloudflare_chunks: number;
   missing_cloudflare_chunks: number;
-  missing_gemini_chunks: number;
   has_embedding_cf_column: boolean;
   has_embedding_model_column: boolean;
   has_embedding_cf_model_column: boolean;
@@ -108,7 +107,7 @@ export interface StorageAdapter {
     options?: { provider?: AiProvider; embeddingModel?: string }
   ): Promise<RetrievedChunkRef[]>;
   getTotalChunksCount(): Promise<number>;
-  getEmbeddingDimensions(provider?: AiProvider): Promise<number | null>;
+  getEmbeddingDimensions(): Promise<number | null>;
   recordConversation(record: ConversationRecord): Promise<void>;
   getHistory(): Promise<ConversationRecord[]>;
   clearHistory(): Promise<void>;
@@ -387,7 +386,7 @@ export class PostgresBlobStorage implements StorageAdapter {
     hasEmbeddingCfModelColumn: false,
     embeddingNullable: false,
   };
-  private cachedEmbeddingDims: Partial<Record<AiProvider, number>> = {};
+  private cachedEmbeddingDims: number | null = null;
 
   constructor(databaseUrl: string, poolOverride?: Pool) {
     this.databaseUrl = databaseUrl;
@@ -723,87 +722,58 @@ export class PostgresBlobStorage implements StorageAdapter {
   ): Promise<void> {
     if (chunks.length === 0) return;
     await this.init();
-    const provider = options.provider ?? "gemini";
 
-    if (provider === "cloudflare") {
-      if (!this.schemaCaps.hasEmbeddingCfColumn || !this.schemaCaps.embeddingNullable) {
-        throw new StorageConfigError(
-          "Database migration 001_cloudflare_embeddings.sql has not been applied yet (missing nullable `embedding` or `embedding_cf` column). Run the explicit SQL migration before indexing with AI_PROVIDER=cloudflare."
-        );
-      }
+    if (!this.schemaCaps.hasEmbeddingCfColumn || !this.schemaCaps.embeddingNullable) {
+      throw new StorageConfigError(
+        "Database migration 001_cloudflare_embeddings.sql has not been applied yet (missing nullable `embedding` or `embedding_cf` column). Run the explicit SQL migration before indexing with Cloudflare Workers AI."
+      );
     }
 
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
 
-      if (provider === "cloudflare") {
-        const sql = this.pgVectorEnabled
-          ? `INSERT INTO documind_chunks (
-               chunk_id, document_id, filename, page_number, text, token_count,
-               embedding, embedding_cf, embedding_cf_model
-             ) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7::vector, $8)`
-          : `INSERT INTO documind_chunks (
-               chunk_id, document_id, filename, page_number, text, token_count,
-               embedding, embedding_cf, embedding_cf_model
-             ) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7::double precision[], $8)`;
+      const sql = this.pgVectorEnabled
+        ? `INSERT INTO documind_chunks (
+             chunk_id, document_id, filename, page_number, text, token_count,
+             embedding, embedding_cf, embedding_cf_model
+           ) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7::vector, $8)
+           ON CONFLICT (chunk_id) DO UPDATE SET
+             text = EXCLUDED.text,
+             token_count = EXCLUDED.token_count,
+             embedding_cf = EXCLUDED.embedding_cf,
+             embedding_cf_model = EXCLUDED.embedding_cf_model`
+        : `INSERT INTO documind_chunks (
+             chunk_id, document_id, filename, page_number, text, token_count,
+             embedding, embedding_cf, embedding_cf_model
+           ) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7::double precision[], $8)
+           ON CONFLICT (chunk_id) DO UPDATE SET
+             text = EXCLUDED.text,
+             token_count = EXCLUDED.token_count,
+             embedding_cf = EXCLUDED.embedding_cf,
+             embedding_cf_model = EXCLUDED.embedding_cf_model`;
 
-        for (const c of chunks) {
-          const vec = c.embedding_cf;
-          if (!Array.isArray(vec) || vec.length === 0) {
-            throw new Error(`Missing Cloudflare embedding vector for chunk ${c.chunk_id}.`);
-          }
-          const embeddingParam = this.pgVectorEnabled ? toVectorLiteral(vec) : vec;
-          const cfModel = c.embedding_cf_model ?? options.embeddingModel ?? "@cf/baai/bge-m3";
-          await client.query(sql, [
-            c.chunk_id,
-            c.document_id,
-            c.filename,
-            c.page_number,
-            c.text,
-            c.token_count,
-            embeddingParam,
-            cfModel,
-          ]);
+      for (const c of chunks) {
+        const vec = c.embedding_cf;
+        if (!Array.isArray(vec) || vec.length === 0) {
+          throw new Error(`Missing Cloudflare embedding vector for chunk ${c.chunk_id}.`);
         }
-      } else {
-        const includeModelCol = this.schemaCaps.hasEmbeddingModelColumn;
-        const sql = this.pgVectorEnabled
-          ? includeModelCol
-            ? `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding, embedding_model)
-               VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8)`
-            : `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding)
-               VALUES ($1, $2, $3, $4, $5, $6, $7::vector)`
-          : includeModelCol
-          ? `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding, embedding_model)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::double precision[], $8)`
-          : `INSERT INTO documind_chunks (chunk_id, document_id, filename, page_number, text, token_count, embedding)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::double precision[])`;
-
-        for (const c of chunks) {
-          const vec = c.embedding;
-          if (!Array.isArray(vec) || vec.length === 0) {
-            throw new Error(`Missing Gemini embedding vector for chunk ${c.chunk_id}.`);
-          }
-          const embeddingParam = this.pgVectorEnabled ? toVectorLiteral(vec) : vec;
-          const params: unknown[] = [
-            c.chunk_id,
-            c.document_id,
-            c.filename,
-            c.page_number,
-            c.text,
-            c.token_count,
-            embeddingParam,
-          ];
-          if (includeModelCol) {
-            params.push(c.embedding_model ?? options.embeddingModel ?? "gemini-embedding-2");
-          }
-          await client.query(sql, params);
-        }
+        const embeddingParam = this.pgVectorEnabled ? toVectorLiteral(vec) : vec;
+        const cfModel = c.embedding_cf_model ?? options.embeddingModel ?? "@cf/baai/bge-m3";
+        await client.query(sql, [
+          c.chunk_id,
+          c.document_id,
+          c.filename,
+          c.page_number,
+          c.text,
+          c.token_count,
+          embeddingParam,
+          cfModel,
+        ]);
       }
 
       await client.query("COMMIT");
-      this.cachedEmbeddingDims = {};
+      this.cachedEmbeddingDims = null;
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
@@ -821,7 +791,7 @@ export class PostgresBlobStorage implements StorageAdapter {
     if (!res.rows[0]) {
       return { deleted: false };
     }
-    this.cachedEmbeddingDims = {};
+    this.cachedEmbeddingDims = null;
     return {
       deleted: true,
       filename: String(res.rows[0].filename),
@@ -836,32 +806,32 @@ export class PostgresBlobStorage implements StorageAdapter {
     options: { provider?: AiProvider; embeddingModel?: string } = {}
   ): Promise<RetrievedChunkRef[]> {
     await this.init();
-    const provider = options.provider ?? "gemini";
     const hasFilter = Array.isArray(documentIds) && documentIds.length > 0;
 
-    if (provider === "cloudflare" && !this.schemaCaps.hasEmbeddingCfColumn) {
+    if (!this.schemaCaps.hasEmbeddingCfColumn) {
       throw new StorageConfigError(
-        "Database migration 001_cloudflare_embeddings.sql has not been applied yet (`embedding_cf` column missing). Run the explicit SQL migration and backfill before querying with AI_PROVIDER=cloudflare."
+        "Database migration 001_cloudflare_embeddings.sql has not been applied yet (`embedding_cf` column missing). Run the explicit SQL migration and backfill before querying with Cloudflare Workers AI."
       );
     }
 
-    const storedDims = await this.getEmbeddingDimensions(provider);
+    const storedDims = await this.getEmbeddingDimensions();
     if (storedDims !== null && queryEmbedding.length !== storedDims) {
       throw new Error(
-        `Vector dimension mismatch for ${provider} retrieval: query vector has ${queryEmbedding.length} dimensions while stored chunks have ${storedDims} dimensions.`
+        `Vector dimension mismatch for cloudflare retrieval: query vector has ${queryEmbedding.length} dimensions while stored embedding_cf chunks have ${storedDims} dimensions.`
       );
     }
 
-    const vectorCol = provider === "cloudflare" ? "embedding_cf" : "embedding";
-    const whereClauses: string[] = [`${vectorCol} IS NOT NULL`];
+    const whereClauses: string[] = ["embedding_cf IS NOT NULL"];
     const baseParams: unknown[] = [];
 
-    if (provider === "cloudflare" && options.embeddingModel && this.schemaCaps.hasEmbeddingCfModelColumn) {
+    if (options.embeddingModel && this.schemaCaps.hasEmbeddingCfModelColumn) {
       baseParams.push(options.embeddingModel);
       whereClauses.push(`embedding_cf_model = $${baseParams.length}`);
-    } else if (provider === "gemini" && options.embeddingModel && this.schemaCaps.hasEmbeddingModelColumn) {
-      baseParams.push(options.embeddingModel);
-      whereClauses.push(`(embedding_model IS NULL OR embedding_model = $${baseParams.length})`);
+    }
+
+    if (this.pgVectorEnabled) {
+      baseParams.push(queryEmbedding.length);
+      whereClauses.push(`vector_dims(embedding_cf) = $${baseParams.length}`);
     }
 
     if (hasFilter) {
@@ -876,11 +846,11 @@ export class PostgresBlobStorage implements StorageAdapter {
       const vecIdx = baseParams.length + 1;
       const limitIdx = baseParams.length + 2;
       const sql = `SELECT chunk_id, document_id, filename, page_number, text,
-                          (${vectorCol} <=> $${vecIdx}::vector) AS distance,
-                          (1 - (${vectorCol} <=> $${vecIdx}::vector)) AS similarity
+                          (embedding_cf <=> $${vecIdx}::vector) AS distance,
+                          (1 - (embedding_cf <=> $${vecIdx}::vector)) AS similarity
                    FROM documind_chunks
                    WHERE ${whereSql}
-                   ORDER BY ${vectorCol} <=> $${vecIdx}::vector ASC
+                   ORDER BY embedding_cf <=> $${vecIdx}::vector ASC
                    LIMIT $${limitIdx}`;
 
       const res = await this.pool.query(sql, [...baseParams, vecLiteral, topK]);
@@ -900,7 +870,7 @@ export class PostgresBlobStorage implements StorageAdapter {
       });
     }
 
-    const sql = `SELECT chunk_id, document_id, filename, page_number, text, ${vectorCol} AS vec
+    const sql = `SELECT chunk_id, document_id, filename, page_number, text, embedding_cf AS vec
                  FROM documind_chunks
                  WHERE ${whereSql}`;
     const res = await this.pool.query(sql, baseParams);
@@ -939,23 +909,21 @@ export class PostgresBlobStorage implements StorageAdapter {
     return Number(res.rows[0]?.cnt ?? 0);
   }
 
-  async getEmbeddingDimensions(provider: AiProvider = "gemini"): Promise<number | null> {
+  async getEmbeddingDimensions(): Promise<number | null> {
     await this.init();
-    if (provider === "cloudflare" && !this.schemaCaps.hasEmbeddingCfColumn) {
+    if (!this.schemaCaps.hasEmbeddingCfColumn) {
       return null;
     }
-    const cached = this.cachedEmbeddingDims[provider];
-    if (typeof cached === "number" && cached > 0) {
-      return cached;
+    if (typeof this.cachedEmbeddingDims === "number" && this.cachedEmbeddingDims > 0) {
+      return this.cachedEmbeddingDims;
     }
-    const vectorCol = provider === "cloudflare" ? "embedding_cf" : "embedding";
     const sql = this.pgVectorEnabled
-      ? `SELECT vector_dims(${vectorCol}) AS dims FROM documind_chunks WHERE ${vectorCol} IS NOT NULL LIMIT 1`
-      : `SELECT array_length(${vectorCol}, 1) AS dims FROM documind_chunks WHERE ${vectorCol} IS NOT NULL LIMIT 1`;
+      ? `SELECT vector_dims(embedding_cf) AS dims FROM documind_chunks WHERE embedding_cf IS NOT NULL LIMIT 1`
+      : `SELECT array_length(embedding_cf, 1) AS dims FROM documind_chunks WHERE embedding_cf IS NOT NULL LIMIT 1`;
     const res = await this.pool.query(sql);
     const dims = res.rows[0]?.dims;
     if (typeof dims === "number" && dims > 0) {
-      this.cachedEmbeddingDims[provider] = dims;
+      this.cachedEmbeddingDims = dims;
       return dims;
     }
     return null;
@@ -966,32 +934,28 @@ export class PostgresBlobStorage implements StorageAdapter {
     const hasCf = this.schemaCaps.hasEmbeddingCfColumn;
     const cfSelect = hasCf
       ? `COUNT(*) FILTER (WHERE embedding_cf IS NOT NULL)::int AS cloudflare_chunks,
-         COUNT(*) FILTER (WHERE embedding_cf IS NULL)::int AS missing_cloudflare_chunks,
-         COUNT(*) FILTER (WHERE embedding IS NULL AND embedding_cf IS NOT NULL)::int AS missing_gemini_chunks`
+         COUNT(*) FILTER (WHERE embedding_cf IS NULL)::int AS missing_cloudflare_chunks`
       : `0::int AS cloudflare_chunks,
-         COUNT(*)::int AS missing_cloudflare_chunks,
-         0::int AS missing_gemini_chunks`;
+         COUNT(*)::int AS missing_cloudflare_chunks`;
 
     const res = await this.pool.query<{
       total_chunks: number;
-      gemini_chunks: number;
+      legacy_chunks: number;
       cloudflare_chunks: number;
       missing_cloudflare_chunks: number;
-      missing_gemini_chunks: number;
     }>(
       `SELECT
          COUNT(*)::int AS total_chunks,
-         COUNT(*) FILTER (WHERE embedding IS NOT NULL)::int AS gemini_chunks,
+         COUNT(*) FILTER (WHERE embedding IS NOT NULL)::int AS legacy_chunks,
          ${cfSelect}
        FROM documind_chunks`
     );
     const row = res.rows[0];
     return {
       total_chunks: Number(row?.total_chunks ?? 0),
-      gemini_chunks: Number(row?.gemini_chunks ?? 0),
+      legacy_chunks: Number(row?.legacy_chunks ?? 0),
       cloudflare_chunks: Number(row?.cloudflare_chunks ?? 0),
       missing_cloudflare_chunks: Number(row?.missing_cloudflare_chunks ?? 0),
-      missing_gemini_chunks: Number(row?.missing_gemini_chunks ?? 0),
       has_embedding_cf_column: this.schemaCaps.hasEmbeddingCfColumn,
       has_embedding_model_column: this.schemaCaps.hasEmbeddingModelColumn,
       has_embedding_cf_model_column: this.schemaCaps.hasEmbeddingCfModelColumn,
@@ -1018,6 +982,48 @@ export class PostgresBlobStorage implements StorageAdapter {
       [limit]
     );
     return res.rows.map((r) => ({ chunk_id: String(r.chunk_id), text: String(r.text) }));
+  }
+
+  async fetchDocumentsWithMissingChunks(limit: number): Promise<DocumentRecord[]> {
+    await this.init();
+    const res = await this.pool.query(
+      `SELECT d.id, d.filename, d.size_bytes, d.pages, d.chunks_count, d.status, d.progress,
+              d.error_message, d.sha256, d.blob_url, d.blob_pathname, d.uploaded_at
+       FROM documind_documents d
+       WHERE NOT EXISTS (
+         SELECT 1 FROM documind_chunks c WHERE c.document_id = d.id
+       )
+       ORDER BY d.uploaded_at ASC
+       LIMIT $1`,
+      [limit]
+    );
+    return res.rows.map((r) => this.mapDocRow(r));
+  }
+
+  async markCompleteDocumentsIndexed(): Promise<number> {
+    await this.init();
+    if (!this.schemaCaps.hasEmbeddingCfColumn) {
+      return 0;
+    }
+    const res = await this.pool.query(
+      `UPDATE documind_documents d
+       SET status = 'Indexed Successfully',
+           progress = 100,
+           error_message = NULL,
+           chunks_count = sub.total_chunks
+       FROM (
+         SELECT document_id,
+                COUNT(*)::int AS total_chunks,
+                COUNT(*) FILTER (WHERE embedding_cf IS NULL)::int AS pending_cf
+         FROM documind_chunks
+         GROUP BY document_id
+       ) sub
+       WHERE d.id = sub.document_id
+         AND sub.total_chunks > 0
+         AND sub.pending_cf = 0
+         AND (d.status <> 'Indexed Successfully' OR d.progress < 100 OR d.chunks_count <> sub.total_chunks)`
+    );
+    return res.rowCount ?? 0;
   }
 
   async saveCloudflareChunkEmbeddings(
@@ -1047,65 +1053,7 @@ export class PostgresBlobStorage implements StorageAdapter {
         updated += res.rowCount ?? 0;
       }
       await client.query("COMMIT");
-      return updated;
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
-  }
-
-  async fetchChunksNeedingGeminiEmbedding(
-    limit: number
-  ): Promise<Array<{ chunk_id: string; text: string }>> {
-    await this.init();
-    const res = await this.pool.query<{ chunk_id: string; text: string }>(
-      `SELECT chunk_id, text
-       FROM documind_chunks
-       WHERE embedding IS NULL
-       ORDER BY chunk_id ASC
-       LIMIT $1`,
-      [limit]
-    );
-    return res.rows.map((r) => ({ chunk_id: String(r.chunk_id), text: String(r.text) }));
-  }
-
-  async saveGeminiChunkEmbeddings(
-    items: Array<{ chunk_id: string; embedding: number[]; embedding_model: string }>
-  ): Promise<number> {
-    if (items.length === 0) return 0;
-    await this.init();
-    const client = await this.pool.connect();
-    let updated = 0;
-    try {
-      await client.query("BEGIN");
-      const includeModel = this.schemaCaps.hasEmbeddingModelColumn;
-      const sql = this.pgVectorEnabled
-        ? includeModel
-          ? `UPDATE documind_chunks
-             SET embedding = $1::vector, embedding_model = $2
-             WHERE chunk_id = $3 AND embedding IS NULL`
-          : `UPDATE documind_chunks
-             SET embedding = $1::vector
-             WHERE chunk_id = $2 AND embedding IS NULL`
-        : includeModel
-        ? `UPDATE documind_chunks
-           SET embedding = $1::double precision[], embedding_model = $2
-           WHERE chunk_id = $3 AND embedding IS NULL`
-        : `UPDATE documind_chunks
-           SET embedding = $1::double precision[]
-           WHERE chunk_id = $2 AND embedding IS NULL`;
-
-      for (const item of items) {
-        const param = this.pgVectorEnabled ? toVectorLiteral(item.embedding) : item.embedding;
-        const params = includeModel
-          ? [param, item.embedding_model, item.chunk_id]
-          : [param, item.chunk_id];
-        const res = await client.query(sql, params);
-        updated += res.rowCount ?? 0;
-      }
-      await client.query("COMMIT");
+      this.cachedEmbeddingDims = null;
       return updated;
     } catch (err) {
       await client.query("ROLLBACK");
@@ -1402,7 +1350,6 @@ export class LocalDevJsonStorage implements StorageAdapter {
     documentIds?: string[],
     options: { provider?: AiProvider; embeddingModel?: string } = {}
   ): Promise<RetrievedChunkRef[]> {
-    const provider = options.provider ?? "gemini";
     const scopeSet =
       documentIds && documentIds.length > 0 ? new Set(documentIds) : null;
 
@@ -1410,10 +1357,9 @@ export class LocalDevJsonStorage implements StorageAdapter {
       if (scopeSet && !scopeSet.has(c.document_id)) return false;
       const doc = this.store.documents[c.document_id];
       if (!doc || doc.status !== "Indexed Successfully") return false;
-      const vec = provider === "cloudflare" ? c.embedding_cf : c.embedding;
+      const vec = c.embedding_cf;
       if (!Array.isArray(vec) || vec.length !== queryEmbedding.length) return false;
       if (
-        provider === "cloudflare" &&
         options.embeddingModel &&
         c.embedding_cf_model &&
         c.embedding_cf_model !== options.embeddingModel
@@ -1424,7 +1370,7 @@ export class LocalDevJsonStorage implements StorageAdapter {
     });
 
     const scored = candidates.map((chunk) => {
-      const vec = (provider === "cloudflare" ? chunk.embedding_cf : chunk.embedding) ?? [];
+      const vec = chunk.embedding_cf ?? [];
       const sim = cosineSimilarity(queryEmbedding, vec);
       return {
         chunk,
@@ -1450,9 +1396,9 @@ export class LocalDevJsonStorage implements StorageAdapter {
     return this.store.chunks.length;
   }
 
-  async getEmbeddingDimensions(provider: AiProvider = "gemini"): Promise<number | null> {
+  async getEmbeddingDimensions(): Promise<number | null> {
     for (const chunk of this.store.chunks) {
-      const vec = provider === "cloudflare" ? chunk.embedding_cf : chunk.embedding;
+      const vec = chunk.embedding_cf;
       if (Array.isArray(vec) && vec.length > 0) {
         return vec.length;
       }
