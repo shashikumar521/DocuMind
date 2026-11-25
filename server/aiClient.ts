@@ -1,5 +1,7 @@
+import crypto from "crypto";
 import {
   CF_COMPARE_TOTAL_BUDGET_MS,
+  classifyCloudflareError,
   embedCloudflareQuery,
   formatCloudflareError,
   generateCloudflareEmbeddings,
@@ -24,17 +26,21 @@ import {
   isGeminiConfigured,
   RetrievedChunkRef,
 } from "./geminiClient.js";
+import { buildOptimizedRagPrompt, redactSecrets } from "./ragPrompt.js";
 
 export type AiProvider = "gemini" | "cloudflare";
 
 export const GEMINI_EMBEDDING_DIMENSIONS = 3072;
 
-// Keep primary Gemini attempt+retry bounded when Cloudflare fallback is ready
-// so the combined request fits well inside Vercel's 60s maxDuration.
-const GEMINI_FALLBACK_PRIMARY_ATTEMPT_TIMEOUT_MS = 12_000;
-const GEMINI_FALLBACK_PRIMARY_TOTAL_BUDGET_MS = 18_000;
+// Stay well inside Vercel's 60s maxDuration across retrieval + Gemini + Cloudflare fallback.
+export const VERCEL_REQUEST_DEADLINE_MS = 52_000;
+
+const GEMINI_FALLBACK_PRIMARY_ATTEMPT_TIMEOUT_MS = 11_000;
+const GEMINI_FALLBACK_PRIMARY_TOTAL_BUDGET_MS = 15_000;
 const GEMINI_FALLBACK_PRIMARY_MAX_ATTEMPTS = 2;
-const CF_FALLBACK_TOTAL_BUDGET_MS = 25_000;
+const CF_FALLBACK_RESERVED_MS = 18_000;
+const CF_FALLBACK_ATTEMPT_TIMEOUT_MS = 15_000;
+const CF_FALLBACK_TOTAL_BUDGET_MS = 24_000;
 
 export interface AiGenerationOptions {
   totalBudgetMs?: number;
@@ -42,6 +48,10 @@ export interface AiGenerationOptions {
   maxAttempts?: number;
   provider?: AiProvider;
   allowFallback?: boolean;
+  deadlineMs?: number;
+  requestId?: string;
+  endpoint?: string;
+  retrievalDurationMs?: number;
 }
 
 export interface AiRagResult {
@@ -61,6 +71,43 @@ export interface AiNoRagResult {
   fallbackReason?: string;
 }
 
+export interface AiTelemetryEvent {
+  event: "ai_request";
+  requestId: string;
+  endpoint?: string;
+  selectedProvider: AiProvider;
+  fallbackProvider: AiProvider | null;
+  model: string;
+  fallbackUsed: boolean;
+  fallbackReason?: string;
+  retrievalDurationMs?: number;
+  chunksCount?: number;
+  contextChars?: number;
+  promptChars?: number;
+  providerDurationMs: number;
+  httpStatus: number;
+  timedOut: boolean;
+  finalStatus: "success" | "fallback_success" | "error";
+}
+
+function emitAiTelemetry(payload: AiTelemetryEvent): void {
+  const safePayload: AiTelemetryEvent = {
+    ...payload,
+    requestId: redactSecrets(payload.requestId),
+    model: redactSecrets(payload.model),
+    ...(payload.endpoint ? { endpoint: redactSecrets(payload.endpoint) } : {}),
+    ...(payload.fallbackReason ? { fallbackReason: redactSecrets(payload.fallbackReason) } : {}),
+  };
+  const line = `[ai.telemetry] ${JSON.stringify(safePayload)}`;
+  if (payload.finalStatus === "error") {
+    console.error(line);
+  } else if (payload.fallbackUsed) {
+    console.warn(line);
+  } else {
+    console.info(line);
+  }
+}
+
 export class DualProviderFailureError extends Error {
   statusCode: number;
   primaryProvider: AiProvider;
@@ -78,7 +125,9 @@ export class DualProviderFailureError extends Error {
     statusCode: number;
   }) {
     super(
-      `Both primary AI (${params.primaryProvider}) and fallback AI (${params.fallbackProvider}) failed. Primary: ${params.primaryMessage} | Fallback: ${params.fallbackMessage}`
+      redactSecrets(
+        `Both primary AI (${params.primaryProvider}) and fallback AI (${params.fallbackProvider}) failed. Primary: ${params.primaryMessage} | Fallback: ${params.fallbackMessage}`
+      )
     );
     this.name = "DualProviderFailureError";
     this.statusCode = params.statusCode;
@@ -150,24 +199,72 @@ export function isFallbackEligibleGeminiError(err: unknown): {
 function buildGeminiPrimaryOptions(
   options: AiGenerationOptions,
   fallbackReady: boolean
-): { totalBudgetMs?: number; attemptTimeoutMs?: number; maxAttempts?: number } {
+): {
+  totalBudgetMs?: number;
+  attemptTimeoutMs?: number;
+  maxAttempts?: number;
+  deadlineMs?: number;
+} {
   if (!fallbackReady) {
     return {
       totalBudgetMs: options.totalBudgetMs,
       attemptTimeoutMs: options.attemptTimeoutMs,
       maxAttempts: options.maxAttempts,
+      deadlineMs: options.deadlineMs,
     };
   }
-  return {
-    totalBudgetMs:
+
+  if (options.deadlineMs !== undefined) {
+    const remainingMs = Math.max(0, options.deadlineMs - Date.now());
+    const reservedMaxBudget =
+      remainingMs > CF_FALLBACK_RESERVED_MS + 4_000
+        ? Math.min(GEMINI_FALLBACK_PRIMARY_TOTAL_BUDGET_MS, remainingMs - CF_FALLBACK_RESERVED_MS)
+        : Math.min(GEMINI_FALLBACK_PRIMARY_TOTAL_BUDGET_MS, Math.max(100, Math.floor(remainingMs * 0.45)));
+    const totalBudgetMs =
       options.totalBudgetMs !== undefined
-        ? Math.min(options.totalBudgetMs, GEMINI_FALLBACK_PRIMARY_TOTAL_BUDGET_MS)
-        : GEMINI_FALLBACK_PRIMARY_TOTAL_BUDGET_MS,
+        ? Math.min(options.totalBudgetMs, reservedMaxBudget)
+        : reservedMaxBudget;
+    const attemptTimeoutMs =
+      options.attemptTimeoutMs !== undefined
+        ? Math.min(options.attemptTimeoutMs, totalBudgetMs)
+        : Math.min(GEMINI_FALLBACK_PRIMARY_ATTEMPT_TIMEOUT_MS, totalBudgetMs);
+    return {
+      totalBudgetMs,
+      attemptTimeoutMs,
+      maxAttempts: options.maxAttempts ?? GEMINI_FALLBACK_PRIMARY_MAX_ATTEMPTS,
+      deadlineMs: Math.min(options.deadlineMs, Date.now() + totalBudgetMs),
+    };
+  }
+
+  const totalBudgetMs =
+    options.totalBudgetMs !== undefined
+      ? Math.min(options.totalBudgetMs, GEMINI_FALLBACK_PRIMARY_TOTAL_BUDGET_MS)
+      : GEMINI_FALLBACK_PRIMARY_TOTAL_BUDGET_MS;
+  return {
+    totalBudgetMs,
     attemptTimeoutMs:
       options.attemptTimeoutMs !== undefined
         ? Math.min(options.attemptTimeoutMs, GEMINI_FALLBACK_PRIMARY_ATTEMPT_TIMEOUT_MS)
         : GEMINI_FALLBACK_PRIMARY_ATTEMPT_TIMEOUT_MS,
     maxAttempts: options.maxAttempts ?? GEMINI_FALLBACK_PRIMARY_MAX_ATTEMPTS,
+  };
+}
+
+function buildCloudflareFallbackOptions(options: AiGenerationOptions): {
+  totalBudgetMs?: number;
+  attemptTimeoutMs?: number;
+  maxAttempts?: number;
+  deadlineMs?: number;
+} {
+  const totalBudgetMs = options.totalBudgetMs ?? CF_FALLBACK_TOTAL_BUDGET_MS;
+  return {
+    totalBudgetMs,
+    attemptTimeoutMs:
+      options.attemptTimeoutMs !== undefined
+        ? Math.min(options.attemptTimeoutMs, CF_FALLBACK_ATTEMPT_TIMEOUT_MS)
+        : CF_FALLBACK_ATTEMPT_TIMEOUT_MS,
+    maxAttempts: options.maxAttempts,
+    deadlineMs: options.deadlineMs,
   };
 }
 
@@ -189,25 +286,27 @@ function assertProviderVectorsValid(
 
 export async function generateEmbeddings(
   texts: string[],
-  provider: AiProvider = getActiveAiProvider()
+  provider: AiProvider = getActiveAiProvider(),
+  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number; maxAttempts?: number } = {}
 ): Promise<number[][]> {
   const model = getActiveEmbeddingModel(provider);
   const vectors =
     provider === "cloudflare"
-      ? await generateCloudflareEmbeddings(texts)
-      : await generateGeminiEmbeddings(texts);
+      ? await generateCloudflareEmbeddings(texts, options)
+      : await generateGeminiEmbeddings(texts, options);
   return assertProviderVectorsValid(vectors, provider, model);
 }
 
 export async function embedQuery(
   question: string,
-  provider: AiProvider = getActiveAiProvider()
+  provider: AiProvider = getActiveAiProvider(),
+  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number } = {}
 ): Promise<number[]> {
   const model = getActiveEmbeddingModel(provider);
   const vector =
     provider === "cloudflare"
-      ? await embedCloudflareQuery(question)
-      : await embedGeminiQuery(question);
+      ? await embedCloudflareQuery(question, options)
+      : await embedGeminiQuery(question, options);
   assertProviderVectorsValid([vector], provider, model);
   return vector;
 }
@@ -217,20 +316,60 @@ export async function generateRagAnswer(
   chunks: RetrievedChunkRef[],
   options: AiGenerationOptions = {}
 ): Promise<AiRagResult> {
+  const requestId = options.requestId ?? crypto.randomUUID();
   const primaryProvider = options.provider ?? getActiveAiProvider();
+  const promptMetrics = buildOptimizedRagPrompt(question, chunks);
+  const providerStart = Date.now();
 
   if (primaryProvider === "cloudflare") {
     const model = getCloudflareChatModel();
-    const res = await generateCloudflareRagAnswer(question, chunks, options);
-    console.info(
-      `[ai] Handled RAG request with provider=cloudflare model=${model} chunks=${chunks.length}`
-    );
-    return {
-      ...res,
-      provider: "cloudflare",
-      model,
-      fallbackUsed: false,
-    };
+    try {
+      const res = await generateCloudflareRagAnswer(question, chunks, options);
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "cloudflare",
+        fallbackProvider: null,
+        model,
+        fallbackUsed: false,
+        retrievalDurationMs: options.retrievalDurationMs,
+        chunksCount: chunks.length,
+        contextChars: promptMetrics.contextChars,
+        promptChars: res.promptPreview.length,
+        providerDurationMs: Date.now() - providerStart,
+        httpStatus: 200,
+        timedOut: false,
+        finalStatus: "success",
+      });
+      return {
+        ...res,
+        provider: "cloudflare",
+        model,
+        fallbackUsed: false,
+      };
+    } catch (err: unknown) {
+      const classified = classifyCloudflareError(err);
+      const formatted = formatCloudflareError(err);
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "cloudflare",
+        fallbackProvider: null,
+        model,
+        fallbackUsed: false,
+        retrievalDurationMs: options.retrievalDurationMs,
+        chunksCount: chunks.length,
+        contextChars: promptMetrics.contextChars,
+        promptChars: promptMetrics.promptPreview.length,
+        providerDurationMs: Date.now() - providerStart,
+        httpStatus: formatted.status,
+        timedOut: classified.kind === "timeout",
+        finalStatus: "error",
+      });
+      throw err;
+    }
   }
 
   const allowFallback = options.allowFallback !== false;
@@ -243,9 +382,23 @@ export async function generateRagAnswer(
       chunks,
       buildGeminiPrimaryOptions(options, fallbackReady)
     );
-    console.info(
-      `[ai] Handled RAG request with provider=gemini model=${geminiModel} chunks=${chunks.length}`
-    );
+    emitAiTelemetry({
+      event: "ai_request",
+      requestId,
+      endpoint: options.endpoint,
+      selectedProvider: "gemini",
+      fallbackProvider: fallbackReady ? "cloudflare" : null,
+      model: geminiModel,
+      fallbackUsed: false,
+      retrievalDurationMs: options.retrievalDurationMs,
+      chunksCount: chunks.length,
+      contextChars: promptMetrics.contextChars,
+      promptChars: res.promptPreview.length,
+      providerDurationMs: Date.now() - providerStart,
+      httpStatus: 200,
+      timedOut: false,
+      finalStatus: "success",
+    });
     return {
       ...res,
       provider: "gemini",
@@ -255,23 +408,63 @@ export async function generateRagAnswer(
   } catch (primaryErr: unknown) {
     const check = isFallbackEligibleGeminiError(primaryErr);
     if (!fallbackReady || !check.eligible) {
+      const primaryFormatted = formatGeminiError(primaryErr);
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "gemini",
+        fallbackProvider: fallbackReady ? "cloudflare" : null,
+        model: geminiModel,
+        fallbackUsed: false,
+        retrievalDurationMs: options.retrievalDurationMs,
+        chunksCount: chunks.length,
+        contextChars: promptMetrics.contextChars,
+        promptChars: promptMetrics.promptPreview.length,
+        providerDurationMs: Date.now() - providerStart,
+        httpStatus: primaryFormatted.status,
+        timedOut: check.reason === "timeout",
+        finalStatus: "error",
+      });
       throw primaryErr;
     }
 
     const cfModel = getCloudflareChatModel();
-    console.warn(
-      `[ai] Primary provider=gemini model=${geminiModel} failed (reason=${check.reason}, status=${check.status}); falling back to provider=cloudflare model=${cfModel} for RAG request (chunks=${chunks.length}).`
-    );
-
+    const cfStart = Date.now();
     try {
-      const cfRes = await generateCloudflareRagAnswer(question, chunks, {
-        totalBudgetMs: options.totalBudgetMs ?? CF_FALLBACK_TOTAL_BUDGET_MS,
-        attemptTimeoutMs: options.attemptTimeoutMs,
-        maxAttempts: options.maxAttempts,
-      });
-      console.info(
-        `[ai] Handled RAG request via fallback provider=cloudflare model=${cfModel} (fallback_from=gemini, reason=${check.reason}, chunks=${chunks.length}).`
+      const remainingBeforeCf =
+        options.deadlineMs !== undefined ? options.deadlineMs - Date.now() : undefined;
+      if (remainingBeforeCf !== undefined && remainingBeforeCf <= 80) {
+        const deadlineErr = new Error(
+          "Cloudflare Workers AI request timed out (shared request deadline reached)."
+        );
+        deadlineErr.name = "AbortError";
+        throw deadlineErr;
+      }
+
+      const cfRes = await generateCloudflareRagAnswer(
+        question,
+        chunks,
+        buildCloudflareFallbackOptions(options)
       );
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "cloudflare",
+        fallbackProvider: "cloudflare",
+        model: cfModel,
+        fallbackUsed: true,
+        fallbackReason: check.reason,
+        retrievalDurationMs: options.retrievalDurationMs,
+        chunksCount: chunks.length,
+        contextChars: promptMetrics.contextChars,
+        promptChars: cfRes.promptPreview.length,
+        providerDurationMs: Date.now() - cfStart,
+        httpStatus: 200,
+        timedOut: false,
+        finalStatus: "fallback_success",
+      });
       return {
         ...cfRes,
         provider: "cloudflare",
@@ -282,9 +475,25 @@ export async function generateRagAnswer(
     } catch (fallbackErr: unknown) {
       const primaryFormatted = formatGeminiError(primaryErr);
       const fallbackFormatted = formatCloudflareError(fallbackErr);
-      console.error(
-        `[ai] Dual-provider RAG failure: primary=gemini (status=${primaryFormatted.status}) and fallback=cloudflare (status=${fallbackFormatted.status}).`
-      );
+      const cfClassified = classifyCloudflareError(fallbackErr);
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "cloudflare",
+        fallbackProvider: "cloudflare",
+        model: cfModel,
+        fallbackUsed: true,
+        fallbackReason: check.reason,
+        retrievalDurationMs: options.retrievalDurationMs,
+        chunksCount: chunks.length,
+        contextChars: promptMetrics.contextChars,
+        promptChars: promptMetrics.promptPreview.length,
+        providerDurationMs: Date.now() - providerStart,
+        httpStatus: fallbackFormatted.status,
+        timedOut: check.reason === "timeout" || cfClassified.kind === "timeout",
+        finalStatus: "error",
+      });
       throw new DualProviderFailureError({
         primaryProvider: "gemini",
         fallbackProvider: "cloudflare",
@@ -302,20 +511,53 @@ export async function generateWithoutRagAnswerWithMeta(
   question: string,
   options: AiGenerationOptions = {}
 ): Promise<AiNoRagResult> {
+  const requestId = options.requestId ?? crypto.randomUUID();
   const primaryProvider = options.provider ?? getActiveAiProvider();
+  const providerStart = Date.now();
 
   if (primaryProvider === "cloudflare") {
     const model = getCloudflareChatModel();
-    const answer = await generateCloudflareWithoutRagAnswer(question, options);
-    console.info(
-      `[ai] Handled non-RAG request with provider=cloudflare model=${model}`
-    );
-    return {
-      answer,
-      provider: "cloudflare",
-      model,
-      fallbackUsed: false,
-    };
+    try {
+      const answer = await generateCloudflareWithoutRagAnswer(question, options);
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "cloudflare",
+        fallbackProvider: null,
+        model,
+        fallbackUsed: false,
+        promptChars: question.length,
+        providerDurationMs: Date.now() - providerStart,
+        httpStatus: 200,
+        timedOut: false,
+        finalStatus: "success",
+      });
+      return {
+        answer,
+        provider: "cloudflare",
+        model,
+        fallbackUsed: false,
+      };
+    } catch (err: unknown) {
+      const formatted = formatCloudflareError(err);
+      const classified = classifyCloudflareError(err);
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "cloudflare",
+        fallbackProvider: null,
+        model,
+        fallbackUsed: false,
+        promptChars: question.length,
+        providerDurationMs: Date.now() - providerStart,
+        httpStatus: formatted.status,
+        timedOut: classified.kind === "timeout",
+        finalStatus: "error",
+      });
+      throw err;
+    }
   }
 
   const allowFallback = options.allowFallback !== false;
@@ -327,9 +569,20 @@ export async function generateWithoutRagAnswerWithMeta(
       question,
       buildGeminiPrimaryOptions(options, fallbackReady)
     );
-    console.info(
-      `[ai] Handled non-RAG request with provider=gemini model=${geminiModel}`
-    );
+    emitAiTelemetry({
+      event: "ai_request",
+      requestId,
+      endpoint: options.endpoint,
+      selectedProvider: "gemini",
+      fallbackProvider: fallbackReady ? "cloudflare" : null,
+      model: geminiModel,
+      fallbackUsed: false,
+      promptChars: question.length,
+      providerDurationMs: Date.now() - providerStart,
+      httpStatus: 200,
+      timedOut: false,
+      finalStatus: "success",
+    });
     return {
       answer,
       provider: "gemini",
@@ -339,23 +592,56 @@ export async function generateWithoutRagAnswerWithMeta(
   } catch (primaryErr: unknown) {
     const check = isFallbackEligibleGeminiError(primaryErr);
     if (!fallbackReady || !check.eligible) {
+      const primaryFormatted = formatGeminiError(primaryErr);
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "gemini",
+        fallbackProvider: fallbackReady ? "cloudflare" : null,
+        model: geminiModel,
+        fallbackUsed: false,
+        promptChars: question.length,
+        providerDurationMs: Date.now() - providerStart,
+        httpStatus: primaryFormatted.status,
+        timedOut: check.reason === "timeout",
+        finalStatus: "error",
+      });
       throw primaryErr;
     }
 
     const cfModel = getCloudflareChatModel();
-    console.warn(
-      `[ai] Primary provider=gemini model=${geminiModel} failed (reason=${check.reason}, status=${check.status}); falling back to provider=cloudflare model=${cfModel} for non-RAG request.`
-    );
-
+    const cfStart = Date.now();
     try {
-      const answer = await generateCloudflareWithoutRagAnswer(question, {
-        totalBudgetMs: options.totalBudgetMs ?? CF_FALLBACK_TOTAL_BUDGET_MS,
-        attemptTimeoutMs: options.attemptTimeoutMs,
-        maxAttempts: options.maxAttempts,
-      });
-      console.info(
-        `[ai] Handled non-RAG request via fallback provider=cloudflare model=${cfModel} (fallback_from=gemini, reason=${check.reason}).`
+      const remainingBeforeCf =
+        options.deadlineMs !== undefined ? options.deadlineMs - Date.now() : undefined;
+      if (remainingBeforeCf !== undefined && remainingBeforeCf <= 80) {
+        const deadlineErr = new Error(
+          "Cloudflare Workers AI request timed out (shared request deadline reached)."
+        );
+        deadlineErr.name = "AbortError";
+        throw deadlineErr;
+      }
+
+      const answer = await generateCloudflareWithoutRagAnswer(
+        question,
+        buildCloudflareFallbackOptions(options)
       );
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "cloudflare",
+        fallbackProvider: "cloudflare",
+        model: cfModel,
+        fallbackUsed: true,
+        fallbackReason: check.reason,
+        promptChars: question.length,
+        providerDurationMs: Date.now() - cfStart,
+        httpStatus: 200,
+        timedOut: false,
+        finalStatus: "fallback_success",
+      });
       return {
         answer,
         provider: "cloudflare",
@@ -366,9 +652,22 @@ export async function generateWithoutRagAnswerWithMeta(
     } catch (fallbackErr: unknown) {
       const primaryFormatted = formatGeminiError(primaryErr);
       const fallbackFormatted = formatCloudflareError(fallbackErr);
-      console.error(
-        `[ai] Dual-provider non-RAG failure: primary=gemini (status=${primaryFormatted.status}) and fallback=cloudflare (status=${fallbackFormatted.status}).`
-      );
+      const cfClassified = classifyCloudflareError(fallbackErr);
+      emitAiTelemetry({
+        event: "ai_request",
+        requestId,
+        endpoint: options.endpoint,
+        selectedProvider: "cloudflare",
+        fallbackProvider: "cloudflare",
+        model: cfModel,
+        fallbackUsed: true,
+        fallbackReason: check.reason,
+        promptChars: question.length,
+        providerDurationMs: Date.now() - providerStart,
+        httpStatus: fallbackFormatted.status,
+        timedOut: check.reason === "timeout" || cfClassified.kind === "timeout",
+        finalStatus: "error",
+      });
       throw new DualProviderFailureError({
         primaryProvider: "gemini",
         fallbackProvider: "cloudflare",
@@ -395,7 +694,7 @@ export function formatAiError(
   provider: AiProvider = getActiveAiProvider()
 ): { status: number; message: string } {
   if (err instanceof DualProviderFailureError) {
-    return { status: err.statusCode, message: err.message };
+    return { status: err.statusCode, message: redactSecrets(err.message) };
   }
   if (isCloudflareErrorInstance(err)) {
     return formatCloudflareError(err);

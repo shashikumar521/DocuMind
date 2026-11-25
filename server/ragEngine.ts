@@ -11,6 +11,7 @@ import {
   isFallbackEligibleGeminiError,
   RetrievedChunkRef,
 } from "./aiClient.js";
+import { DEFAULT_RAG_TOP_K } from "./ragPrompt.js";
 import {
   ConversationRecord,
   DocumentRecord,
@@ -282,19 +283,27 @@ class RagEngine {
 
   async retrieveChunks(
     question: string,
-    topK = 5,
+    topK = DEFAULT_RAG_TOP_K,
     documentIds?: string[],
-    provider: AiProvider = getActiveAiProvider()
+    provider: AiProvider = getActiveAiProvider(),
+    options: { deadlineMs?: number; requestId?: string } = {}
   ): Promise<RetrievedChunkRef[]> {
     const embeddingModel = getActiveEmbeddingModel(provider);
+    const embedBudgetOptions =
+      options.deadlineMs !== undefined
+        ? { deadlineMs: Math.min(options.deadlineMs, Date.now() + 12_000) }
+        : undefined;
     try {
-      const queryEmbedding = await embedQuery(question, provider);
+      const [, queryEmbedding] = await Promise.all([
+        this.storage.init(),
+        embedQuery(question, provider, embedBudgetOptions),
+      ]);
       const chunks = await this.storage.searchSimilarChunks(queryEmbedding, topK, documentIds, {
         provider,
         embeddingModel,
       });
       console.info(
-        `[ai] Retrieved chunks=${chunks.length} via embedding provider=${provider} model=${embeddingModel}`
+        `[ai] Retrieved chunks=${chunks.length} topK=${topK} via embedding provider=${provider} model=${embeddingModel}${options.requestId ? ` requestId=${options.requestId}` : ""}`
       );
       return chunks;
     } catch (primaryErr: unknown) {
@@ -303,6 +312,9 @@ class RagEngine {
       }
       const check = isFallbackEligibleGeminiError(primaryErr);
       if (!check.eligible) {
+        throw primaryErr;
+      }
+      if (options.deadlineMs !== undefined && options.deadlineMs - Date.now() <= 2_000) {
         throw primaryErr;
       }
 
@@ -318,13 +330,15 @@ class RagEngine {
       console.warn(
         `[ai] Primary embedding provider=gemini failed (reason=${check.reason}, status=${check.status}); falling back retrieval to provider=cloudflare model=${cfModel}.`
       );
-      const cfQueryEmbedding = await embedQuery(question, "cloudflare");
+      const cfQueryEmbedding = await embedQuery(question, "cloudflare", {
+        deadlineMs: options.deadlineMs,
+      });
       const chunks = await this.storage.searchSimilarChunks(cfQueryEmbedding, topK, documentIds, {
         provider: "cloudflare",
         embeddingModel: cfModel,
       });
       console.info(
-        `[ai] Retrieved chunks=${chunks.length} via fallback embedding provider=cloudflare model=${cfModel}`
+        `[ai] Retrieved chunks=${chunks.length} topK=${topK} via fallback embedding provider=cloudflare model=${cfModel}${options.requestId ? ` requestId=${options.requestId}` : ""}`
       );
       return chunks;
     }

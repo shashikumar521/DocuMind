@@ -21,7 +21,7 @@ const DEFAULT_PREFS: UserPreferences = {
   theme: "dark",
   autoIndex: true,
   includeCitations: true,
-  topK: 5,
+  topK: 3,
   displayName: "Dr. Maya Lin",
   email: "maya.lin@documind.ai",
 };

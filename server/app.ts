@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import "dotenv/config";
 import express, { Express, NextFunction, Request, Response } from "express";
 import multer from "multer";
@@ -11,12 +12,14 @@ import {
   getCompareTotalBudgetMs,
   isAiConfigured,
   isCloudflareFallbackAvailable,
+  VERCEL_REQUEST_DEADLINE_MS,
 } from "./aiClient.js";
 import {
   CHUNK_OVERLAP_TOKENS,
   CHUNK_SIZE_TOKENS,
   ragEngine,
 } from "./ragEngine.js";
+import { DEFAULT_RAG_TOP_K } from "./ragPrompt.js";
 import {
   runWithBlobOidcContext,
   sanitizeDatabaseErrorMessage,
@@ -264,12 +267,26 @@ export function createApiApp(): Express {
     const topK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
-        : 5;
+        : DEFAULT_RAG_TOP_K;
+
+    const requestId = crypto.randomUUID();
+    const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
 
     try {
       const provider = getActiveAiProvider();
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider);
-      const ragResult = await generateRagAnswer(question, chunks, { provider });
+      const retrievalStart = Date.now();
+      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider, {
+        deadlineMs,
+        requestId,
+      });
+      const retrievalDurationMs = Date.now() - retrievalStart;
+      const ragResult = await generateRagAnswer(question, chunks, {
+        provider,
+        deadlineMs,
+        requestId,
+        endpoint: "/api/chat/ask",
+        retrievalDurationMs,
+      });
       await ragEngine.recordQuestion(question, ragResult.answer, chunks);
       res.json({
         question,
@@ -300,17 +317,39 @@ export function createApiApp(): Express {
     const topK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
-        : 5;
+        : DEFAULT_RAG_TOP_K;
+
+    const requestId = crypto.randomUUID();
+    const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
 
     try {
       const provider = getActiveAiProvider();
       const totalBudgetMs = getCompareTotalBudgetMs(provider);
+      const retrievalStart = Date.now();
       // Retrieve chunks first (cached for repeated queries) so we don't waste
       // a baseline generation call if embedding/retrieval fails or rate-limits.
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider);
+      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider, {
+        deadlineMs,
+        requestId,
+      });
+      const retrievalDurationMs = Date.now() - retrievalStart;
       const [withoutRagResult, withRagResult] = await Promise.all([
-        generateWithoutRagAnswerWithMeta(question, { totalBudgetMs, provider }),
-        generateRagAnswer(question, chunks, { totalBudgetMs, provider }),
+        generateWithoutRagAnswerWithMeta(question, {
+          totalBudgetMs,
+          provider,
+          deadlineMs,
+          requestId,
+          endpoint: req.path,
+          retrievalDurationMs,
+        }),
+        generateRagAnswer(question, chunks, {
+          totalBudgetMs,
+          provider,
+          deadlineMs,
+          requestId,
+          endpoint: req.path,
+          retrievalDurationMs,
+        }),
       ]);
       res.json({
         question,
@@ -355,16 +394,30 @@ export function createApiApp(): Express {
     const topK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
-        : 5;
+        : DEFAULT_RAG_TOP_K;
+
+    const requestId = crypto.randomUUID();
+    const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
 
     try {
       const provider = getActiveAiProvider();
+      const retrievalStart = Date.now();
       const [chunks, embeddingDims, totalChunks] = await Promise.all([
-        ragEngine.retrieveChunks(question, topK, documentIds, provider),
+        ragEngine.retrieveChunks(question, topK, documentIds, provider, {
+          deadlineMs,
+          requestId,
+        }),
         ragEngine.getEmbeddingDimensions(provider),
         ragEngine.getTotalChunksCount(),
       ]);
-      const ragResult = await generateRagAnswer(question, chunks, { provider });
+      const retrievalDurationMs = Date.now() - retrievalStart;
+      const ragResult = await generateRagAnswer(question, chunks, {
+        provider,
+        deadlineMs,
+        requestId,
+        endpoint: "/api/retrieval/inspect",
+        retrievalDurationMs,
+      });
       res.json({
         question,
         chunks,

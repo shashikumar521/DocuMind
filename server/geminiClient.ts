@@ -1,25 +1,28 @@
 import { AsyncLocalStorage } from "async_hooks";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import {
+  buildOptimizedRagPrompt,
+  RAG_MAX_OUTPUT_TOKENS,
+  redactSecrets,
+} from "./ragPrompt.js";
 
 export const GEMINI_CHAT_MODEL = "gemini-3.1-flash-lite";
 export const GEMINI_EMBEDDING_MODEL = "gemini-embedding-2";
 
-const GEMINI_GENERATE_TIMEOUT_MS = 22_000;
-const GEMINI_GENERATE_TOTAL_BUDGET_MS = 45_000;
+const GEMINI_GENERATE_TIMEOUT_MS = 12_000;
+const GEMINI_GENERATE_TOTAL_BUDGET_MS = 22_000;
 const GEMINI_COMPARE_TOTAL_BUDGET_MS = 38_000;
-const GEMINI_EMBED_TIMEOUT_MS = 12_000;
-const GEMINI_EMBED_TOTAL_BUDGET_MS = 28_000;
+const GEMINI_EMBED_TIMEOUT_MS = 8_000;
+const GEMINI_EMBED_TOTAL_BUDGET_MS = 16_000;
 
-const MAX_CHUNK_CHARS = 2_800;
-const MAX_CONTEXT_CHARS = 14_000;
 const EMBED_BATCH_SIZE = 15;
 
 // Global rate-limit protection settings
 const GEMINI_MAX_CONCURRENT_REQUESTS = 2;
-const DEFAULT_MAX_ATTEMPTS = 3; // 1 initial attempt + up to 2 retries
-const BASE_RATE_LIMIT_DELAY_MS = 1_500;
-const BASE_TRANSIENT_DELAY_MS = 800;
-const MAX_BACKOFF_DELAY_MS = 10_000;
+const DEFAULT_MAX_ATTEMPTS = 2; // 1 initial attempt + up to 1 retry for transient errors
+const BASE_RATE_LIMIT_DELAY_MS = 1_200;
+const BASE_TRANSIENT_DELAY_MS = 600;
+const MAX_BACKOFF_DELAY_MS = 6_000;
 
 // Bounded caches to eliminate duplicate Gemini API calls
 const QUERY_EMBED_CACHE_MAX = 100;
@@ -49,9 +52,15 @@ export function getGeminiChatModel(): string {
   return configured;
 }
 
-function supportsThinkingLevel(model: string): boolean {
-  const normalized = model.toLowerCase();
-  return normalized.startsWith("gemini-3") || normalized.startsWith("gemini-4");
+function getThinkingLevelForModel(model: string): ThinkingLevel | undefined {
+  const normalized = model.replace(/^models\//i, "").toLowerCase();
+  if (normalized.includes("flash-lite")) {
+    return ThinkingLevel.MINIMAL;
+  }
+  if (normalized.startsWith("gemini-3") || normalized.startsWith("gemini-4")) {
+    return ThinkingLevel.LOW;
+  }
+  return undefined;
 }
 
 export interface RetrievedChunkRef {
@@ -487,31 +496,39 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function withRetryAndTimeout<T>(
-  fn: (signal: AbortSignal) => Promise<T>,
+  fn: (signal: AbortSignal, perAttemptMs: number) => Promise<T>,
   options: {
     maxAttempts?: number;
     attemptTimeoutMs?: number;
     totalBudgetMs?: number;
+    deadlineMs?: number;
   } = {}
 ): Promise<T> {
   const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const attemptTimeoutMs = options.attemptTimeoutMs ?? GEMINI_GENERATE_TIMEOUT_MS;
-  const totalBudgetMs = options.totalBudgetMs ?? GEMINI_GENERATE_TOTAL_BUDGET_MS;
-  const deadline = Date.now() + totalBudgetMs;
+  const defaultBudget = options.totalBudgetMs ?? GEMINI_GENERATE_TOTAL_BUDGET_MS;
+  const budgetCapDeadline = Date.now() + defaultBudget;
+  const deadline =
+    options.deadlineMs !== undefined
+      ? Math.min(budgetCapDeadline, options.deadlineMs)
+      : budgetCapDeadline;
+  const effectiveTotalBudgetMs = Math.max(0, deadline - Date.now());
 
   let lastErr: unknown;
   let lastMeta: AttemptHttpMeta | undefined;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const remainingMs = deadline - Date.now();
-    if (remainingMs <= 1_000) {
+    if (remainingMs <= 50) {
       break;
     }
 
     const perAttemptMs = Math.min(attemptTimeoutMs, remainingMs);
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      controller.abort(new Error(`Gemini API request timed out after ${perAttemptMs}ms.`));
+      const timeoutErr = new Error(`Gemini API request timed out after ${perAttemptMs}ms.`);
+      timeoutErr.name = "AbortError";
+      controller.abort(timeoutErr);
     }, perAttemptMs);
 
     const attemptMeta: AttemptHttpMeta = {};
@@ -521,7 +538,7 @@ async function withRetryAndTimeout<T>(
       return await attemptMetaStorage.run(attemptMeta, async () => {
         const releaseSlot = await acquireGeminiSlot(controller.signal);
         try {
-          return await fn(controller.signal);
+          return await fn(controller.signal, perAttemptMs);
         } finally {
           releaseSlot();
         }
@@ -555,8 +572,8 @@ async function withRetryAndTimeout<T>(
         delayMs = computeExponentialBackoffWithJitter(base, attempt);
       }
 
-      // Ensure we leave enough budget to actually execute the retry attempt cleanly
-      if (delayMs + 4_000 > timeLeftAfter) {
+      const minAttemptRoomMs = effectiveTotalBudgetMs < 5_000 ? 150 : 3_000;
+      if (delayMs + minAttemptRoomMs > timeLeftAfter) {
         if (classified.kind === "rate_limit") {
           throw new GeminiRateLimitError(
             formatRateLimitMessage(classified.retryAfterMs),
@@ -580,8 +597,12 @@ async function withRetryAndTimeout<T>(
         classified.retryAfterMs
       );
     }
+    throw lastErr;
   }
-  throw lastErr;
+
+  const deadlineErr = new Error("Gemini API request timed out (shared request deadline exceeded).");
+  deadlineErr.name = "AbortError";
+  throw deadlineErr;
 }
 
 function formatQuotaExhaustedMessage(isFreeTierOrZeroLimit?: boolean): string {
@@ -600,11 +621,7 @@ function formatRateLimitMessage(retryAfterMs?: number): string {
 }
 
 function sanitizeGeminiErrorMessage(message: string): string {
-  return message
-    .replace(/([?&]key=)[^&\s'"`]+/gi, "$1***")
-    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "AIza***")
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer ***")
-    .replace(/postgres(?:ql)?:\/\/[^\s'"`]+@/gi, "postgresql://***@");
+  return redactSecrets(message);
 }
 
 export function formatGeminiError(err: unknown): { status: number; message: string } {
@@ -716,9 +733,11 @@ export function clearGeminiCachesForTest(): void {
   inFlightRagAnswers.clear();
 }
 
-export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
+export async function generateEmbeddings(
+  texts: string[],
+  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number; maxAttempts?: number } = {}
+): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const ai = getGeminiClient(GEMINI_EMBED_TIMEOUT_MS);
 
   // Deduplicate identical chunk texts so boilerplate/headers are embedded only once
   const uniqueTexts: string[] = [];
@@ -736,8 +755,9 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   for (let i = 0; i < uniqueTexts.length; i += EMBED_BATCH_SIZE) {
     const batch = uniqueTexts.slice(i, i + EMBED_BATCH_SIZE);
     const result = await withRetryAndTimeout(
-      (signal) =>
-        ai.models.embedContent({
+      (signal, perAttemptMs) => {
+        const ai = getGeminiClient(perAttemptMs);
+        return ai.models.embedContent({
           model: GEMINI_EMBEDDING_MODEL,
           contents: batch.map((text) => ({
             role: "user",
@@ -746,11 +766,13 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
           config: {
             abortSignal: signal,
           },
-        }),
+        });
+      },
       {
-        maxAttempts: DEFAULT_MAX_ATTEMPTS,
-        attemptTimeoutMs: GEMINI_EMBED_TIMEOUT_MS,
-        totalBudgetMs: GEMINI_EMBED_TOTAL_BUDGET_MS,
+        maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        attemptTimeoutMs: options.attemptTimeoutMs ?? GEMINI_EMBED_TIMEOUT_MS,
+        totalBudgetMs: options.totalBudgetMs ?? GEMINI_EMBED_TOTAL_BUDGET_MS,
+        deadlineMs: options.deadlineMs,
       }
     );
 
@@ -771,7 +793,10 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   return originalToUniqueIdx.map((idx) => uniqueVectors[idx]);
 }
 
-export async function embedQuery(question: string): Promise<number[]> {
+export async function embedQuery(
+  question: string,
+  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number } = {}
+): Promise<number[]> {
   const normalized = question.trim();
   const cacheKey = `${GEMINI_EMBEDDING_MODEL}::${normalized}`;
 
@@ -786,7 +811,7 @@ export async function embedQuery(question: string): Promise<number[]> {
   }
 
   const promise = (async () => {
-    const [vector] = await generateEmbeddings([normalized]);
+    const [vector] = await generateEmbeddings([normalized], options);
     writeTtlCache(
       queryEmbeddingCache,
       cacheKey,
@@ -820,33 +845,20 @@ export const NO_RAG_SYSTEM_INSTRUCTION = [
 ].join(" ");
 
 export function buildRagPrompt(question: string, chunks: RetrievedChunkRef[]): string {
-  let contextBlock = "(No matching document passages were retrieved.)";
-  if (chunks.length > 0) {
-    const formattedPassages: string[] = [];
-    let totalChars = 0;
-    for (let idx = 0; idx < chunks.length; idx++) {
-      const c = chunks[idx];
-      const trimmedText =
-        c.text.length > MAX_CHUNK_CHARS ? `${c.text.slice(0, MAX_CHUNK_CHARS)}...` : c.text;
-      const entry = `[Passage ${idx + 1} | File: ${c.filename} | Page: ${c.page_number} | Chunk ID: ${c.chunk_id}]\n${trimmedText}`;
-      if (totalChars + entry.length > MAX_CONTEXT_CHARS && formattedPassages.length > 0) {
-        break;
-      }
-      formattedPassages.push(entry);
-      totalChars += entry.length;
-    }
-    contextBlock = formattedPassages.join("\n\n---\n\n");
-  }
-
-  return `<retrieved_context>\n${contextBlock}\n</retrieved_context>\n\nUser Question: ${question}`;
+  return buildOptimizedRagPrompt(question, chunks).promptPreview;
 }
 
 export async function generateRagAnswer(
   question: string,
   chunks: RetrievedChunkRef[],
-  options: { totalBudgetMs?: number; attemptTimeoutMs?: number; maxAttempts?: number } = {}
+  options: {
+    totalBudgetMs?: number;
+    attemptTimeoutMs?: number;
+    maxAttempts?: number;
+    deadlineMs?: number;
+  } = {}
 ): Promise<{ answer: string; promptPreview: string }> {
-  const promptPreview = buildRagPrompt(question, chunks);
+  const { promptPreview } = buildOptimizedRagPrompt(question, chunks);
   if (chunks.length === 0) {
     return {
       answer:
@@ -856,6 +868,7 @@ export async function generateRagAnswer(
   }
 
   const model = getGeminiChatModel();
+  const thinkingLevel = getThinkingLevelForModel(model);
   const dedupeKey = `${model}::${question.trim()}::${chunks.map((c) => c.chunk_id).join(",")}`;
   const inFlight = inFlightRagAnswers.get(dedupeKey);
   if (inFlight) {
@@ -864,24 +877,27 @@ export async function generateRagAnswer(
 
   const attemptTimeoutMs = options.attemptTimeoutMs ?? GEMINI_GENERATE_TIMEOUT_MS;
   const promise = (async () => {
-    const ai = getGeminiClient(attemptTimeoutMs);
     const response = await withRetryAndTimeout(
-      (signal) =>
-        ai.models.generateContent({
+      (signal, perAttemptMs) => {
+        const ai = getGeminiClient(perAttemptMs);
+        return ai.models.generateContent({
           model,
           contents: promptPreview,
           config: {
             systemInstruction: RAG_SYSTEM_INSTRUCTION,
+            maxOutputTokens: RAG_MAX_OUTPUT_TOKENS,
             abortSignal: signal,
-            ...(supportsThinkingLevel(model)
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+            ...(thinkingLevel !== undefined
+              ? { thinkingConfig: { thinkingLevel } }
               : {}),
           },
-        }),
+        });
+      },
       {
         maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         attemptTimeoutMs,
         totalBudgetMs: options.totalBudgetMs ?? GEMINI_GENERATE_TOTAL_BUDGET_MS,
+        deadlineMs: options.deadlineMs,
       }
     );
 
@@ -899,9 +915,15 @@ export async function generateRagAnswer(
 
 export async function generateWithoutRagAnswer(
   question: string,
-  options: { totalBudgetMs?: number; attemptTimeoutMs?: number; maxAttempts?: number } = {}
+  options: {
+    totalBudgetMs?: number;
+    attemptTimeoutMs?: number;
+    maxAttempts?: number;
+    deadlineMs?: number;
+  } = {}
 ): Promise<string> {
   const model = getGeminiChatModel();
+  const thinkingLevel = getThinkingLevelForModel(model);
   const normalized = question.trim();
   const cacheKey = `${model}::${normalized}`;
 
@@ -917,24 +939,27 @@ export async function generateWithoutRagAnswer(
 
   const attemptTimeoutMs = options.attemptTimeoutMs ?? GEMINI_GENERATE_TIMEOUT_MS;
   const promise = (async () => {
-    const ai = getGeminiClient(attemptTimeoutMs);
     const response = await withRetryAndTimeout(
-      (signal) =>
-        ai.models.generateContent({
+      (signal, perAttemptMs) => {
+        const ai = getGeminiClient(perAttemptMs);
+        return ai.models.generateContent({
           model,
           contents: normalized,
           config: {
             systemInstruction: NO_RAG_SYSTEM_INSTRUCTION,
+            maxOutputTokens: RAG_MAX_OUTPUT_TOKENS,
             abortSignal: signal,
-            ...(supportsThinkingLevel(model)
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+            ...(thinkingLevel !== undefined
+              ? { thinkingConfig: { thinkingLevel } }
               : {}),
           },
-        }),
+        });
+      },
       {
         maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         attemptTimeoutMs,
         totalBudgetMs: options.totalBudgetMs ?? GEMINI_GENERATE_TOTAL_BUDGET_MS,
+        deadlineMs: options.deadlineMs,
       }
     );
     const answer = (response.text ?? "No response returned by Gemini.").trim();

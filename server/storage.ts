@@ -387,6 +387,7 @@ export class PostgresBlobStorage implements StorageAdapter {
     hasEmbeddingCfModelColumn: false,
     embeddingNullable: false,
   };
+  private cachedEmbeddingDims: Partial<Record<AiProvider, number>> = {};
 
   constructor(databaseUrl: string, poolOverride?: Pool) {
     this.databaseUrl = databaseUrl;
@@ -432,6 +433,7 @@ export class PostgresBlobStorage implements StorageAdapter {
       max: serverless ? 3 : 5,
       idleTimeoutMillis: serverless ? 10_000 : 20_000,
       connectionTimeoutMillis: 10_000,
+      query_timeout: 15_000,
       allowExitOnIdle: serverless,
       ssl: needsSsl && !hasExplicitSslParam ? { rejectUnauthorized: true } : undefined,
     });
@@ -801,6 +803,7 @@ export class PostgresBlobStorage implements StorageAdapter {
       }
 
       await client.query("COMMIT");
+      this.cachedEmbeddingDims = {};
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
@@ -818,6 +821,7 @@ export class PostgresBlobStorage implements StorageAdapter {
     if (!res.rows[0]) {
       return { deleted: false };
     }
+    this.cachedEmbeddingDims = {};
     return {
       deleted: true,
       filename: String(res.rows[0].filename),
@@ -940,13 +944,21 @@ export class PostgresBlobStorage implements StorageAdapter {
     if (provider === "cloudflare" && !this.schemaCaps.hasEmbeddingCfColumn) {
       return null;
     }
+    const cached = this.cachedEmbeddingDims[provider];
+    if (typeof cached === "number" && cached > 0) {
+      return cached;
+    }
     const vectorCol = provider === "cloudflare" ? "embedding_cf" : "embedding";
     const sql = this.pgVectorEnabled
       ? `SELECT vector_dims(${vectorCol}) AS dims FROM documind_chunks WHERE ${vectorCol} IS NOT NULL LIMIT 1`
       : `SELECT array_length(${vectorCol}, 1) AS dims FROM documind_chunks WHERE ${vectorCol} IS NOT NULL LIMIT 1`;
     const res = await this.pool.query(sql);
     const dims = res.rows[0]?.dims;
-    return typeof dims === "number" && dims > 0 ? dims : null;
+    if (typeof dims === "number" && dims > 0) {
+      this.cachedEmbeddingDims[provider] = dims;
+      return dims;
+    }
+    return null;
   }
 
   async getChunkMigrationStats(): Promise<ChunkMigrationStats> {
