@@ -7,6 +7,8 @@ import {
   generateEmbeddings,
   getActiveAiProvider,
   getActiveEmbeddingModel,
+  isCloudflareFallbackAvailable,
+  isFallbackEligibleGeminiError,
   RetrievedChunkRef,
 } from "./aiClient.js";
 import {
@@ -285,11 +287,47 @@ class RagEngine {
     provider: AiProvider = getActiveAiProvider()
   ): Promise<RetrievedChunkRef[]> {
     const embeddingModel = getActiveEmbeddingModel(provider);
-    const queryEmbedding = await embedQuery(question, provider);
-    return this.storage.searchSimilarChunks(queryEmbedding, topK, documentIds, {
-      provider,
-      embeddingModel,
-    });
+    try {
+      const queryEmbedding = await embedQuery(question, provider);
+      const chunks = await this.storage.searchSimilarChunks(queryEmbedding, topK, documentIds, {
+        provider,
+        embeddingModel,
+      });
+      console.info(
+        `[ai] Retrieved chunks=${chunks.length} via embedding provider=${provider} model=${embeddingModel}`
+      );
+      return chunks;
+    } catch (primaryErr: unknown) {
+      if (provider !== "gemini" || !isCloudflareFallbackAvailable()) {
+        throw primaryErr;
+      }
+      const check = isFallbackEligibleGeminiError(primaryErr);
+      if (!check.eligible) {
+        throw primaryErr;
+      }
+
+      const cfDims = await this.storage.getEmbeddingDimensions("cloudflare").catch(() => null);
+      if (cfDims === null) {
+        console.warn(
+          `[ai] Primary embedding provider=gemini failed (reason=${check.reason}, status=${check.status}); Cloudflare retrieval fallback skipped because storage has no 1024d embedding_cf vectors yet.`
+        );
+        throw primaryErr;
+      }
+
+      const cfModel = getActiveEmbeddingModel("cloudflare");
+      console.warn(
+        `[ai] Primary embedding provider=gemini failed (reason=${check.reason}, status=${check.status}); falling back retrieval to provider=cloudflare model=${cfModel}.`
+      );
+      const cfQueryEmbedding = await embedQuery(question, "cloudflare");
+      const chunks = await this.storage.searchSimilarChunks(cfQueryEmbedding, topK, documentIds, {
+        provider: "cloudflare",
+        embeddingModel: cfModel,
+      });
+      console.info(
+        `[ai] Retrieved chunks=${chunks.length} via fallback embedding provider=cloudflare model=${cfModel}`
+      );
+      return chunks;
+    }
   }
 
   async recordQuestion(

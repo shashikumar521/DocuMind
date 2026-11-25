@@ -4,12 +4,13 @@ import multer from "multer";
 import {
   formatAiError,
   generateRagAnswer,
-  generateWithoutRagAnswer,
+  generateWithoutRagAnswerWithMeta,
   getActiveAiProvider,
   getActiveChatModel,
   getActiveEmbeddingModel,
   getCompareTotalBudgetMs,
   isAiConfigured,
+  isCloudflareFallbackAvailable,
 } from "./aiClient.js";
 import {
   CHUNK_OVERLAP_TOKENS,
@@ -77,12 +78,18 @@ export function createApiApp(): Express {
       const indexedDocs = docs.filter((d) => d.status === "Indexed Successfully");
       const storageInfo = ragEngine.getStorageInfo();
 
+      const fallbackReady = isCloudflareFallbackAvailable();
+      const fallbackModel = getActiveChatModel("cloudflare");
+
       res.json({
         status: "ok",
         backend: "node-express-rag",
         ai_provider: aiProvider,
         chat_model: chatModel,
         ai_configured: aiConfigured,
+        fallback_provider: fallbackReady ? "cloudflare" : null,
+        fallback_configured: fallbackReady,
+        fallback_chat_model: fallbackModel,
         storage_mode: storageInfo.storage_mode,
         vector_store: storageInfo.vector_store,
         object_storage: storageInfo.object_storage,
@@ -100,6 +107,7 @@ export function createApiApp(): Express {
     } catch (err: unknown) {
       const formatted = formatRouteError(err);
       const storageInfo = ragEngine.getStorageInfo();
+      const fallbackReady = isCloudflareFallbackAvailable();
       res.status(formatted.status).json({
         status: "error",
         detail: formatted.message,
@@ -107,6 +115,9 @@ export function createApiApp(): Express {
         ai_provider: aiProvider,
         chat_model: chatModel,
         ai_configured: aiConfigured,
+        fallback_provider: fallbackReady ? "cloudflare" : null,
+        fallback_configured: fallbackReady,
+        fallback_chat_model: getActiveChatModel("cloudflare"),
         storage_mode: storageInfo.storage_mode,
         vector_store: storageInfo.vector_store,
         object_storage: storageInfo.object_storage,
@@ -258,14 +269,16 @@ export function createApiApp(): Express {
     try {
       const provider = getActiveAiProvider();
       const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider);
-      const { answer, promptPreview } = await generateRagAnswer(question, chunks, { provider });
-      await ragEngine.recordQuestion(question, answer, chunks);
+      const ragResult = await generateRagAnswer(question, chunks, { provider });
+      await ragEngine.recordQuestion(question, ragResult.answer, chunks);
       res.json({
         question,
-        model: getActiveChatModel(provider),
-        answer,
+        ai_provider: ragResult.provider,
+        model: ragResult.model,
+        fallback_used: ragResult.fallbackUsed,
+        answer: ragResult.answer,
         sources: chunks,
-        prompt_preview: promptPreview,
+        prompt_preview: ragResult.promptPreview,
       });
     } catch (err: unknown) {
       const formatted = formatRouteError(err);
@@ -295,18 +308,26 @@ export function createApiApp(): Express {
       // Retrieve chunks first (cached for repeated queries) so we don't waste
       // a baseline generation call if embedding/retrieval fails or rate-limits.
       const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, provider);
-      const [withoutRagAnswer, withRagResult] = await Promise.all([
-        generateWithoutRagAnswer(question, { totalBudgetMs, provider }),
+      const [withoutRagResult, withRagResult] = await Promise.all([
+        generateWithoutRagAnswerWithMeta(question, { totalBudgetMs, provider }),
         generateRagAnswer(question, chunks, { totalBudgetMs, provider }),
       ]);
       res.json({
         question,
-        model: getActiveChatModel(provider),
+        ai_provider: withRagResult.provider,
+        model: withRagResult.model,
+        fallback_used: withRagResult.fallbackUsed || withoutRagResult.fallbackUsed,
         without_rag: {
-          answer: withoutRagAnswer,
+          answer: withoutRagResult.answer,
+          ai_provider: withoutRagResult.provider,
+          model: withoutRagResult.model,
+          fallback_used: withoutRagResult.fallbackUsed,
         },
         with_rag: {
           answer: withRagResult.answer,
+          ai_provider: withRagResult.provider,
+          model: withRagResult.model,
+          fallback_used: withRagResult.fallbackUsed,
           sources: chunks,
           prompt_preview: withRagResult.promptPreview,
         },
@@ -343,13 +364,15 @@ export function createApiApp(): Express {
         ragEngine.getEmbeddingDimensions(provider),
         ragEngine.getTotalChunksCount(),
       ]);
-      const { answer, promptPreview } = await generateRagAnswer(question, chunks, { provider });
+      const ragResult = await generateRagAnswer(question, chunks, { provider });
       res.json({
         question,
         chunks,
-        prompt_preview: promptPreview,
-        answer,
-        model: getActiveChatModel(provider),
+        prompt_preview: ragResult.promptPreview,
+        answer: ragResult.answer,
+        ai_provider: ragResult.provider,
+        model: ragResult.model,
+        fallback_used: ragResult.fallbackUsed,
         embedding_model: getActiveEmbeddingModel(provider),
         embedding_dimensions: embeddingDims,
         total_chunks_indexed: totalChunks,

@@ -1,19 +1,28 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { createApiApp } from "../server/app.js";
 import {
+  DualProviderFailureError,
   embedQuery,
+  formatAiError,
   GEMINI_EMBEDDING_DIMENSIONS,
   generateEmbeddings,
   generateRagAnswer,
   generateWithoutRagAnswer,
+  generateWithoutRagAnswerWithMeta,
   getActiveAiProvider,
   getActiveChatModel,
   getActiveEmbeddingModel,
   getExpectedEmbeddingDimensions,
 } from "../server/aiClient.js";
+import {
+  clearGeminiCachesForTest,
+  setGeminiFetchForTest,
+} from "../server/geminiClient.js";
 import {
   clearCloudflareCachesForTest,
   CLOUDFLARE_CHAT_MAX_TOKENS,
@@ -981,6 +990,328 @@ async function runSafetyAndIsolationTests() {
   console.log("PASS: All database identity, Preview isolation, and Production safety tests passed (10/10).");
 }
 
+async function runDualProviderFallbackTests() {
+  const prevEnv = {
+    AI_PROVIDER: process.env.AI_PROVIDER,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GEMINI_MODEL: process.env.GEMINI_MODEL,
+    CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
+    CLOUDFLARE_CHAT_MODEL: process.env.CLOUDFLARE_CHAT_MODEL,
+    CLOUDFLARE_EMBEDDING_MODEL: process.env.CLOUDFLARE_EMBEDDING_MODEL,
+  };
+
+  const sampleChunks = [
+    {
+      rank: 1,
+      chunk_id: "doc_policy_p4_c0",
+      document_id: "doc_policy",
+      filename: "Security_Policy.pdf",
+      page_number: 4,
+      text: "Audit logs must be retained for 365 days in immutable storage.",
+      similarity: 0.96,
+      distance: 0.04,
+    },
+  ];
+
+  try {
+    delete process.env.AI_PROVIDER;
+    delete process.env.GEMINI_MODEL;
+    delete process.env.CLOUDFLARE_CHAT_MODEL;
+    delete process.env.CLOUDFLARE_EMBEDDING_MODEL;
+    process.env.GEMINI_API_KEY = "AIzaTestFakeGeminiSecretKey1234567890";
+    process.env.CLOUDFLARE_ACCOUNT_ID = "cf-test-account-9999";
+    process.env.CLOUDFLARE_API_TOKEN = "Bearer cf-secret-api-token-xyz";
+
+    // 1. Gemini success (Cloudflare must NOT be called)
+    clearGeminiCachesForTest();
+    clearCloudflareCachesForTest();
+    let geminiCalls = 0;
+    let cfCalls = 0;
+    setGeminiFetchForTest(async () => {
+      geminiCalls += 1;
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                role: "model",
+                parts: [{ text: "Audit logs are retained for 365 days [Security_Policy.pdf, p. 4]." }],
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    setCloudflareFetchForTest(async () => {
+      cfCalls += 1;
+      throw new Error("Cloudflare should not be called when Gemini succeeds");
+    });
+
+    const geminiSuccess = await generateRagAnswer(
+      "How long must audit logs be retained?",
+      sampleChunks,
+      { maxAttempts: 1 }
+    );
+    assert.equal(geminiCalls, 1);
+    assert.equal(cfCalls, 0);
+    assert.equal(geminiSuccess.provider, "gemini");
+    assert.equal(geminiSuccess.model, "gemini-3.1-flash-lite");
+    assert.equal(geminiSuccess.fallbackUsed, false);
+    assert.ok(geminiSuccess.answer.includes("[Security_Policy.pdf, p. 4]"));
+
+    // 2. Gemini HTTP 429 rate limit -> automatic Cloudflare fallback preserves question & PDF context
+    clearGeminiCachesForTest();
+    clearCloudflareCachesForTest();
+    cfCalls = 0;
+    setGeminiFetchForTest(async () => {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 429,
+            message: "Rate limit exceeded (RPM).",
+            status: "RESOURCE_EXHAUSTED",
+          },
+        }),
+        { status: 429, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    setCloudflareFetchForTest(async (input, init) => {
+      cfCalls += 1;
+      const url = String(input);
+      assert.equal(
+        url,
+        "https://api.cloudflare.com/client/v4/accounts/cf-test-account-9999/ai/v1/chat/completions"
+      );
+      const headers = init?.headers as Record<string, string>;
+      assert.equal(headers.Authorization, "Bearer cf-secret-api-token-xyz");
+      const body = JSON.parse(String(init?.body)) as {
+        model: string;
+        messages: Array<{ role: string; content: string }>;
+      };
+      assert.equal(body.model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+      const userMsg = body.messages[1].content;
+      assert.ok(userMsg.includes("How long must audit logs be retained?"));
+      assert.ok(userMsg.includes("Security_Policy.pdf"));
+      assert.ok(userMsg.includes("Page: 4"));
+      assert.ok(userMsg.includes("365 days in immutable storage"));
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "Cloudflare fallback: Logs are retained 365 days [Security_Policy.pdf, p. 4].",
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+
+    const fallback429 = await generateRagAnswer(
+      "How long must audit logs be retained?",
+      sampleChunks,
+      { maxAttempts: 1 }
+    );
+    assert.equal(cfCalls, 1);
+    assert.equal(fallback429.provider, "cloudflare");
+    assert.equal(fallback429.model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+    assert.equal(fallback429.fallbackUsed, true);
+    assert.ok(fallback429.answer.includes("[Security_Policy.pdf, p. 4]"));
+
+    // 3. Gemini HTTP 503 temporary service unavailable -> automatic Cloudflare fallback
+    clearGeminiCachesForTest();
+    clearCloudflareCachesForTest();
+    cfCalls = 0;
+    setGeminiFetchForTest(async () => {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 503,
+            message: "The model is overloaded. Please try again later.",
+            status: "UNAVAILABLE",
+          },
+        }),
+        { status: 503, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    setCloudflareFetchForTest(async () => {
+      cfCalls += 1;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "Recovered via Cloudflare after 503 [Security_Policy.pdf, p. 4]." } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+
+    const fallback503 = await generateRagAnswer(
+      "What is the retention window?",
+      sampleChunks,
+      { maxAttempts: 1 }
+    );
+    assert.equal(cfCalls, 1);
+    assert.equal(fallback503.provider, "cloudflare");
+    assert.equal(fallback503.fallbackUsed, true);
+    assert.equal(fallback503.fallbackReason, "transient");
+
+    // 4. Gemini provider timeout -> automatic Cloudflare fallback (plus non-RAG fallback)
+    clearGeminiCachesForTest();
+    clearCloudflareCachesForTest();
+    cfCalls = 0;
+    setGeminiFetchForTest(async () => {
+      const timeoutErr = new Error("Gemini API request timed out after 12000ms.");
+      timeoutErr.name = "AbortError";
+      throw timeoutErr;
+    });
+    setCloudflareFetchForTest(async () => {
+      cfCalls += 1;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "Recovered via Cloudflare after timeout." } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+
+    const fallbackTimeout = await generateRagAnswer(
+      "Timeout test question?",
+      sampleChunks,
+      { maxAttempts: 1 }
+    );
+    assert.equal(cfCalls, 1);
+    assert.equal(fallbackTimeout.provider, "cloudflare");
+    assert.equal(fallbackTimeout.fallbackUsed, true);
+    assert.equal(fallbackTimeout.fallbackReason, "timeout");
+
+    const noRagFallback = await generateWithoutRagAnswerWithMeta("General comparison query?", {
+      maxAttempts: 1,
+    });
+    assert.equal(noRagFallback.provider, "cloudflare");
+    assert.equal(noRagFallback.fallbackUsed, true);
+    assert.equal(noRagFallback.answer, "Recovered via Cloudflare after timeout.");
+
+    // 5. Both Gemini AND Cloudflare fail -> safe error message without exposing secrets
+    clearGeminiCachesForTest();
+    clearCloudflareCachesForTest();
+    setGeminiFetchForTest(async () => {
+      return new Response(
+        JSON.stringify({ error: { code: 503, message: "Service unavailable", status: "UNAVAILABLE" } }),
+        { status: 503 }
+      );
+    });
+    setCloudflareFetchForTest(async () => {
+      return new Response(
+        JSON.stringify({ errors: [{ code: 10000, message: "Authentication error" }] }),
+        { status: 401 }
+      );
+    });
+
+    let dualFailureErr: unknown;
+    try {
+      await generateRagAnswer("Both fail question?", sampleChunks, { maxAttempts: 1 });
+    } catch (err) {
+      dualFailureErr = err;
+    }
+    assert.ok(dualFailureErr instanceof DualProviderFailureError);
+    const formattedDual = formatAiError(dualFailureErr);
+    assert.equal(formattedDual.status, 403);
+    assert.ok(formattedDual.message.includes("gemini"));
+    assert.ok(formattedDual.message.includes("cloudflare"));
+    assert.ok(!formattedDual.message.includes("AIzaTestFakeGeminiSecretKey1234567890"));
+    assert.ok(!formattedDual.message.includes("cf-secret-api-token-xyz"));
+    assert.ok(!formattedDual.message.includes("cf-test-account-9999"));
+
+    // 6. End-to-end Express HTTP route test (/api/health and /api/chat/compare under Gemini 503 -> Cloudflare fallback)
+    clearGeminiCachesForTest();
+    clearCloudflareCachesForTest();
+    setGeminiFetchForTest(async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.toLowerCase().includes("embedcontent")) {
+        return new Response(
+          JSON.stringify({ embeddings: [{ values: unitVec(3072, 0) }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ error: { code: 503, message: "High demand", status: "UNAVAILABLE" } }),
+        { status: 503, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    setCloudflareFetchForTest(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "HTTP fallback response from Cloudflare Llama 3.1." } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+
+    const expressApp = createApiApp();
+    const server = http.createServer(expressApp);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        throw new Error("Failed to bind ephemeral test port");
+      }
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const realFetch = globalThis.fetch;
+
+      const healthResp = await realFetch(`${baseUrl}/api/health`);
+      assert.equal(healthResp.status, 200);
+      const healthBody = (await healthResp.json()) as {
+        ai_provider: string;
+        fallback_provider: string | null;
+        fallback_configured: boolean;
+        fallback_chat_model: string;
+      };
+      assert.equal(healthBody.ai_provider, "gemini");
+      assert.equal(healthBody.fallback_provider, "cloudflare");
+      assert.equal(healthBody.fallback_configured, true);
+      assert.equal(healthBody.fallback_chat_model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+
+      const compareResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "Verify HTTP fallback under Gemini 503" }),
+      });
+      assert.equal(compareResp.status, 200);
+      const compareBody = (await compareResp.json()) as {
+        fallback_used: boolean;
+        without_rag: { answer: string; ai_provider: string; model: string; fallback_used: boolean };
+      };
+      assert.equal(compareBody.fallback_used, true);
+      assert.equal(compareBody.without_rag.ai_provider, "cloudflare");
+      assert.equal(compareBody.without_rag.model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+      assert.equal(compareBody.without_rag.fallback_used, true);
+      assert.equal(compareBody.without_rag.answer, "HTTP fallback response from Cloudflare Llama 3.1.");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
+
+    console.log(
+      "PASS: All dual-provider Gemini->Cloudflare fallback tests passed (6/6: success, 429, 503, timeout, dual failure, HTTP route)."
+    );
+  } finally {
+    setGeminiFetchForTest(null);
+    setCloudflareFetchForTest(null);
+    clearGeminiCachesForTest();
+    clearCloudflareCachesForTest();
+    for (const [key, val] of Object.entries(prevEnv)) {
+      if (val === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = val;
+      }
+    }
+  }
+}
+
 async function runOptionalLiveCloudflareSmokeTest() {
   const hasCreds = Boolean(
     process.env.CLOUDFLARE_ACCOUNT_ID?.trim() &&
@@ -1005,6 +1336,7 @@ async function runOptionalLiveCloudflareSmokeTest() {
 async function main() {
   await runSimulatedTests();
   await runSafetyAndIsolationTests();
+  await runDualProviderFallbackTests();
   await runOptionalLiveCloudflareSmokeTest();
 }
 

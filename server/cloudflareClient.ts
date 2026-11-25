@@ -50,10 +50,22 @@ export function getCloudflareExpectedEmbeddingDimensions(): number {
   return KNOWN_CLOUDFLARE_EMBEDDING_DIMS[model] ?? 1024;
 }
 
+function normalizeAccountId(raw: string | undefined): string {
+  return (raw ?? "").trim().replace(/^["']|["']$/g, "").trim();
+}
+
+function normalizeApiToken(raw: string | undefined): string {
+  return (raw ?? "")
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+}
+
 export function isCloudflareConfigured(): boolean {
   return Boolean(
-    process.env.CLOUDFLARE_ACCOUNT_ID?.trim() &&
-      process.env.CLOUDFLARE_API_TOKEN?.trim()
+    normalizeAccountId(process.env.CLOUDFLARE_ACCOUNT_ID) &&
+      normalizeApiToken(process.env.CLOUDFLARE_API_TOKEN)
   );
 }
 
@@ -114,9 +126,20 @@ function getFetchImpl(): typeof fetch {
   return testFetchOverride ?? globalThis.fetch;
 }
 
+export function isCloudflareErrorInstance(err: unknown): boolean {
+  return (
+    err instanceof CloudflareConfigError ||
+    err instanceof CloudflareAuthError ||
+    err instanceof CloudflareModelError ||
+    err instanceof CloudflareRateLimitError ||
+    err instanceof CloudflareQuotaExhaustedError ||
+    isHttpAttemptError(err)
+  );
+}
+
 function getCloudflareCredentials(): { accountId: string; apiToken: string } {
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
-  const apiToken = process.env.CLOUDFLARE_API_TOKEN?.trim();
+  const accountId = normalizeAccountId(process.env.CLOUDFLARE_ACCOUNT_ID);
+  const apiToken = normalizeApiToken(process.env.CLOUDFLARE_API_TOKEN);
   if (!accountId || !apiToken) {
     const missing: string[] = [];
     if (!accountId) missing.push("CLOUDFLARE_ACCOUNT_ID");
@@ -482,11 +505,20 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
   };
 }
 
+function sanitizeCloudflareErrorMessage(message: string): string {
+  return message
+    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer ***")
+    .replace(/(https?:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/)[^/\s]+/gi, "$1***")
+    .replace(/([?&]key=)[^&\s'"`]+/gi, "$1***")
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "AIza***")
+    .replace(/postgres(?:ql)?:\/\/[^\s'"`]+@/gi, "postgresql://***@");
+}
+
 export function formatCloudflareError(err: unknown): { status: number; message: string } {
   const classified = classifyCloudflareError(err);
   switch (classified.kind) {
     case "config":
-      return { status: classified.statusCode, message: classified.rawMessage };
+      return { status: classified.statusCode, message: sanitizeCloudflareErrorMessage(classified.rawMessage) };
     case "auth":
       return {
         status: 403,
@@ -496,7 +528,7 @@ export function formatCloudflareError(err: unknown): { status: number; message: 
     case "not_found":
       return {
         status: 400,
-        message: `Configured Cloudflare Workers AI model is unavailable (${classified.rawMessage || "check CLOUDFLARE_CHAT_MODEL / CLOUDFLARE_EMBEDDING_MODEL"}).`,
+        message: `Configured Cloudflare Workers AI model is unavailable (${sanitizeCloudflareErrorMessage(classified.rawMessage) || "check CLOUDFLARE_CHAT_MODEL / CLOUDFLARE_EMBEDDING_MODEL"}).`,
       };
     case "quota_exhausted":
       return {
@@ -530,7 +562,7 @@ export function formatCloudflareError(err: unknown): { status: number; message: 
     default:
       return {
         status: classified.statusCode || 500,
-        message: classified.rawMessage || "Unexpected Cloudflare Workers AI error.",
+        message: sanitizeCloudflareErrorMessage(classified.rawMessage) || "Unexpected Cloudflare Workers AI error.",
       };
   }
 }
@@ -722,8 +754,9 @@ interface OpenAiEmbeddingResponse {
 
 interface OpenAiChatCompletionResponse {
   choices?: Array<{
+    text?: string;
     message?: {
-      content?: string | null;
+      content?: string | Array<{ type?: string; text?: string }> | null;
     };
   }>;
   result?: {
@@ -869,7 +902,16 @@ export function buildCloudflareRagPrompt(question: string, chunks: RetrievedChun
 }
 
 function extractChatContent(res: OpenAiChatCompletionResponse): string {
-  const content = res.choices?.[0]?.message?.content ?? res.result?.response;
+  const rawMessageContent = res.choices?.[0]?.message?.content;
+  let content: unknown = rawMessageContent;
+  if (Array.isArray(rawMessageContent)) {
+    content = rawMessageContent
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("");
+  }
+  if (typeof content !== "string" || !content.trim()) {
+    content = res.choices?.[0]?.text ?? res.result?.response;
+  }
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("No text response returned by Cloudflare Workers AI.");
   }
@@ -879,7 +921,7 @@ function extractChatContent(res: OpenAiChatCompletionResponse): string {
 export async function generateCloudflareRagAnswer(
   question: string,
   chunks: RetrievedChunkRef[],
-  options: { totalBudgetMs?: number } = {}
+  options: { totalBudgetMs?: number; attemptTimeoutMs?: number; maxAttempts?: number } = {}
 ): Promise<{ answer: string; promptPreview: string }> {
   const promptPreview = buildCloudflareRagPrompt(question, chunks);
   if (chunks.length === 0) {
@@ -908,8 +950,8 @@ export async function generateCloudflareRagAnswer(
         temperature: CLOUDFLARE_CHAT_TEMPERATURE,
       },
       {
-        maxAttempts: DEFAULT_MAX_ATTEMPTS,
-        attemptTimeoutMs: CF_GENERATE_TIMEOUT_MS,
+        maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        attemptTimeoutMs: options.attemptTimeoutMs ?? CF_GENERATE_TIMEOUT_MS,
         totalBudgetMs: options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS,
       }
     );
@@ -928,7 +970,7 @@ export async function generateCloudflareRagAnswer(
 
 export async function generateCloudflareWithoutRagAnswer(
   question: string,
-  options: { totalBudgetMs?: number } = {}
+  options: { totalBudgetMs?: number; attemptTimeoutMs?: number; maxAttempts?: number } = {}
 ): Promise<string> {
   const model = getCloudflareChatModel();
   const normalized = question.trim();
@@ -953,8 +995,8 @@ export async function generateCloudflareWithoutRagAnswer(
         temperature: CLOUDFLARE_CHAT_TEMPERATURE,
       },
       {
-        maxAttempts: DEFAULT_MAX_ATTEMPTS,
-        attemptTimeoutMs: CF_GENERATE_TIMEOUT_MS,
+        maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        attemptTimeoutMs: options.attemptTimeoutMs ?? CF_GENERATE_TIMEOUT_MS,
         totalBudgetMs: options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS,
       }
     );

@@ -61,12 +61,20 @@ export interface DashboardStats {
 
 export interface CompareResponse {
   question: string;
+  ai_provider?: "gemini" | "cloudflare";
   model?: string;
+  fallback_used?: boolean;
   without_rag: {
     answer: string;
+    ai_provider?: "gemini" | "cloudflare";
+    model?: string;
+    fallback_used?: boolean;
   };
   with_rag: {
     answer: string;
+    ai_provider?: "gemini" | "cloudflare";
+    model?: string;
+    fallback_used?: boolean;
     sources: RetrievedChunk[];
     prompt_preview: string;
   };
@@ -77,7 +85,9 @@ export interface RetrievalInspectResponse {
   chunks: RetrievedChunk[];
   prompt_preview: string;
   answer: string;
+  ai_provider?: "gemini" | "cloudflare";
   model?: string;
+  fallback_used?: boolean;
   embedding_model?: string;
   embedding_dimensions?: number | null;
   total_chunks_indexed?: number;
@@ -90,6 +100,9 @@ export interface HealthStatus {
   ai_provider?: "gemini" | "cloudflare";
   chat_model?: string;
   ai_configured?: boolean;
+  fallback_provider?: "cloudflare" | null;
+  fallback_configured?: boolean;
+  fallback_chat_model?: string;
   storage_mode?: string;
   vector_store: string;
   object_storage?: string;

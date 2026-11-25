@@ -290,12 +290,13 @@ function extractNumericStatus(err: unknown, meta?: AttemptHttpMeta): number | un
   return meta?.status;
 }
 
-function extractParsedApiPayload(rawMessage: string): string {
+function extractParsedApiPayload(rawMessage: string): { text: string; numericCode?: number } {
   const start = rawMessage.indexOf("{");
-  if (start === -1) return rawMessage;
+  if (start === -1) return { text: rawMessage };
   try {
     const parsed = JSON.parse(rawMessage.slice(start)) as {
       error?: {
+        code?: number;
         message?: string;
         status?: string;
         details?: unknown[];
@@ -305,10 +306,24 @@ function extractParsedApiPayload(rawMessage: string): string {
     if (parsed.error?.status) parts.push(parsed.error.status);
     if (parsed.error?.message) parts.push(parsed.error.message);
     if (Array.isArray(parsed.error?.details)) parts.push(JSON.stringify(parsed.error.details));
-    return parts.join(" ") || rawMessage;
+    const numericCode =
+      typeof parsed.error?.code === "number" &&
+      parsed.error.code >= 400 &&
+      parsed.error.code <= 599
+        ? parsed.error.code
+        : undefined;
+    return { text: parts.join(" ") || rawMessage, numericCode };
   } catch {
-    return rawMessage;
+    return { text: rawMessage };
   }
+}
+
+function extractNumericStatusWithPayload(
+  err: unknown,
+  meta: AttemptHttpMeta | undefined,
+  payloadCode: number | undefined
+): number | undefined {
+  return extractNumericStatus(err, meta) ?? payloadCode;
 }
 
 export function classifyGeminiError(err: unknown, meta?: AttemptHttpMeta): ClassifiedError {
@@ -339,8 +354,9 @@ export function classifyGeminiError(err: unknown, meta?: AttemptHttpMeta): Class
   }
 
   const rawMessage = err instanceof Error ? err.message : String(err);
-  const inspectedText = `${rawMessage} ${extractParsedApiPayload(rawMessage)}`.toLowerCase();
-  const statusCode = extractNumericStatus(err, meta);
+  const parsedPayload = extractParsedApiPayload(rawMessage);
+  const inspectedText = `${rawMessage} ${parsedPayload.text}`.toLowerCase();
+  const statusCode = extractNumericStatusWithPayload(err, meta, parsedPayload.numericCode);
   const retryAfterMs = meta?.retryAfterMs;
 
   if (isTimeoutError(err)) {
@@ -435,6 +451,9 @@ export function classifyGeminiError(err: unknown, meta?: AttemptHttpMeta): Class
     statusCode === 504 ||
     inspectedText.includes("unavailable") ||
     inspectedText.includes("high demand") ||
+    inspectedText.includes("overloaded") ||
+    inspectedText.includes("temporarily busy") ||
+    inspectedText.includes("service unavailable") ||
     inspectedText.includes("econnreset") ||
     inspectedText.includes("etimedout") ||
     inspectedText.includes("fetch failed");
@@ -580,6 +599,14 @@ function formatRateLimitMessage(retryAfterMs?: number): string {
   return "Gemini API rate limit reached (requests or tokens per minute). Please wait a few seconds and try again.";
 }
 
+function sanitizeGeminiErrorMessage(message: string): string {
+  return message
+    .replace(/([?&]key=)[^&\s'"`]+/gi, "$1***")
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "AIza***")
+    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer ***")
+    .replace(/postgres(?:ql)?:\/\/[^\s'"`]+@/gi, "postgresql://***@");
+}
+
 export function formatGeminiError(err: unknown): { status: number; message: string } {
   if (err instanceof GeminiConfigError) {
     return { status: err.statusCode, message: err.message };
@@ -630,9 +657,10 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     };
   }
 
+
   return {
     status: 500,
-    message: classified.rawMessage || "Unexpected Gemini API error.",
+    message: sanitizeGeminiErrorMessage(classified.rawMessage) || "Unexpected Gemini API error.",
   };
 }
 
@@ -816,7 +844,7 @@ export function buildRagPrompt(question: string, chunks: RetrievedChunkRef[]): s
 export async function generateRagAnswer(
   question: string,
   chunks: RetrievedChunkRef[],
-  options: { totalBudgetMs?: number } = {}
+  options: { totalBudgetMs?: number; attemptTimeoutMs?: number; maxAttempts?: number } = {}
 ): Promise<{ answer: string; promptPreview: string }> {
   const promptPreview = buildRagPrompt(question, chunks);
   if (chunks.length === 0) {
@@ -834,8 +862,9 @@ export async function generateRagAnswer(
     return inFlight;
   }
 
+  const attemptTimeoutMs = options.attemptTimeoutMs ?? GEMINI_GENERATE_TIMEOUT_MS;
   const promise = (async () => {
-    const ai = getGeminiClient(GEMINI_GENERATE_TIMEOUT_MS);
+    const ai = getGeminiClient(attemptTimeoutMs);
     const response = await withRetryAndTimeout(
       (signal) =>
         ai.models.generateContent({
@@ -850,8 +879,8 @@ export async function generateRagAnswer(
           },
         }),
       {
-        maxAttempts: DEFAULT_MAX_ATTEMPTS,
-        attemptTimeoutMs: GEMINI_GENERATE_TIMEOUT_MS,
+        maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        attemptTimeoutMs,
         totalBudgetMs: options.totalBudgetMs ?? GEMINI_GENERATE_TOTAL_BUDGET_MS,
       }
     );
@@ -870,7 +899,7 @@ export async function generateRagAnswer(
 
 export async function generateWithoutRagAnswer(
   question: string,
-  options: { totalBudgetMs?: number } = {}
+  options: { totalBudgetMs?: number; attemptTimeoutMs?: number; maxAttempts?: number } = {}
 ): Promise<string> {
   const model = getGeminiChatModel();
   const normalized = question.trim();
@@ -886,8 +915,9 @@ export async function generateWithoutRagAnswer(
     return inFlight;
   }
 
+  const attemptTimeoutMs = options.attemptTimeoutMs ?? GEMINI_GENERATE_TIMEOUT_MS;
   const promise = (async () => {
-    const ai = getGeminiClient(GEMINI_GENERATE_TIMEOUT_MS);
+    const ai = getGeminiClient(attemptTimeoutMs);
     const response = await withRetryAndTimeout(
       (signal) =>
         ai.models.generateContent({
@@ -902,8 +932,8 @@ export async function generateWithoutRagAnswer(
           },
         }),
       {
-        maxAttempts: DEFAULT_MAX_ATTEMPTS,
-        attemptTimeoutMs: GEMINI_GENERATE_TIMEOUT_MS,
+        maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        attemptTimeoutMs,
         totalBudgetMs: options.totalBudgetMs ?? GEMINI_GENERATE_TOTAL_BUDGET_MS,
       }
     );
