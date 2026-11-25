@@ -12,7 +12,7 @@ DocuMind is a Retrieval-Augmented Generation (RAG) web application built as a **
 - **Chunking**: Splits extracted text per page into overlapping 500-word/token windows (`CHUNK_SIZE_TOKENS = 500`, `CHUNK_OVERLAP_TOKENS = 100`) preserving `{ chunk_id, document_id, filename, page_number, text, token_count }`.
 - **Dual-Provider AI (`server/aiClient.ts`)**:
   - `AI_PROVIDER=gemini` (default): `gemini-embedding-2` (3072 dimensions) + `gemini-3.1-flash-lite` via `@google/genai`.
-  - `AI_PROVIDER=cloudflare`: `@cf/baai/bge-m3` (1024 dimensions) + `@cf/meta/llama-3.1-8b-instruct-fp8` via Cloudflare Workers AI OpenAI-compatible REST API (`server/cloudflareClient.ts`).
+  - `AI_PROVIDER=cloudflare`: `@cf/baai/bge-m3` (1024 dimensions) + `@cf/google/gemma-4-26b-a4b-it` via Cloudflare Workers AI OpenAI-compatible REST API (`server/cloudflareClient.ts`).
 - **Durable Metadata & Vector Store (PostgreSQL + `pgvector`)**: `server/storage.ts` stores original chunk text alongside separate provider columns (`embedding` 3072-d for Gemini and nullable `embedding_cf vector(1024)` for Cloudflare) and executes cosine similarity retrieval using native `pgvector` `<=>` distance against the active provider's vector column only.
 - **Durable PDF Object Storage (`@vercel/blob`)**: Stores uploaded PDF files in Vercel Blob under `documind/<documentId>/<filename>` and deletes blobs automatically when documents are deleted or fail indexing.
 
@@ -100,7 +100,7 @@ In your Vercel Project Dashboard (**Storage** and **Settings → Environment Var
 3. **AI Provider Configuration**:
    - `AI_PROVIDER` — `"gemini"` (default) or `"cloudflare"`
    - **Gemini**: `GEMINI_API_KEY`, optional `GEMINI_MODEL` (defaults to `gemini-3.1-flash-lite`)
-   - **Cloudflare Workers AI**: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, optional `CLOUDFLARE_CHAT_MODEL` (defaults to `@cf/meta/llama-3.1-8b-instruct-fp8`), optional `CLOUDFLARE_EMBEDDING_MODEL` (defaults to `@cf/baai/bge-m3`)
+   - **Cloudflare Workers AI**: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, optional `CLOUDFLARE_CHAT_MODEL` (defaults to `@cf/google/gemma-4-26b-a4b-it`), optional `CLOUDFLARE_EMBEDDING_MODEL` (defaults to `@cf/baai/bge-m3`)
 
 > **Note on Vercel Function Payload Limits:** Vercel Serverless Functions enforce a 4.5 MB HTTP request body limit per upload request. Keep individual PDF uploads under 4.5 MB when uploading through Vercel Functions.
 

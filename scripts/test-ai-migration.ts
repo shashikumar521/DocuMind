@@ -140,6 +140,7 @@ async function runSimulatedTests() {
         model: string;
         max_tokens: number;
         temperature: number;
+        stream: boolean;
         messages: Array<{ role: string; content: string }>;
       };
       if (url.endsWith("/ai/v1/embeddings")) {
@@ -149,8 +150,9 @@ async function runSimulatedTests() {
         );
       }
       assert.ok(url.endsWith("/ai/v1/chat/completions"));
-      assert.equal(body.model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+      assert.equal(body.model, "@cf/google/gemma-4-26b-a4b-it");
       assert.equal(body.max_tokens, CLOUDFLARE_CHAT_MAX_TOKENS);
+      assert.equal(body.stream, false);
       assert.ok(body.temperature <= 0.2);
       assert.equal(body.messages[0].role, "system");
       const userPrompt = body.messages[1].content;
@@ -221,6 +223,18 @@ async function runSimulatedTests() {
     await assert.rejects(
       () => generateCloudflareWithoutRagAnswer("model test"),
       (err) => formatCloudflareError(err).status === 400
+    );
+
+    clearCloudflareCachesForTest();
+    setCloudflareFetchForTest(async () => {
+      return new Response(
+        JSON.stringify({ errors: [{ code: 5028, message: "Model has been deprecated" }] }),
+        { status: 410 }
+      );
+    });
+    await assert.rejects(
+      () => generateCloudflareWithoutRagAnswer("deprecated model test"),
+      (err) => formatCloudflareError(err).status === 410 && /unavailable/i.test(formatCloudflareError(err).message)
     );
 
     clearCloudflareCachesForTest();
@@ -1088,9 +1102,11 @@ async function runDualProviderFallbackTests() {
       assert.equal(headers.Authorization, "Bearer cf-secret-api-token-xyz");
       const body = JSON.parse(String(init?.body)) as {
         model: string;
+        stream: boolean;
         messages: Array<{ role: string; content: string }>;
       };
-      assert.equal(body.model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+      assert.equal(body.model, "@cf/google/gemma-4-26b-a4b-it");
+      assert.equal(body.stream, false);
       const userMsg = body.messages[1].content;
       assert.ok(userMsg.includes("How long must audit logs be retained?"));
       assert.ok(userMsg.includes("Security_Policy.pdf"));
@@ -1117,7 +1133,7 @@ async function runDualProviderFallbackTests() {
     );
     assert.equal(cfCalls, 1);
     assert.equal(fallback429.provider, "cloudflare");
-    assert.equal(fallback429.model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+    assert.equal(fallback429.model, "@cf/google/gemma-4-26b-a4b-it");
     assert.equal(fallback429.fallbackUsed, true);
     assert.ok(fallback429.answer.includes("[Security_Policy.pdf, p. 4]"));
 
@@ -1154,8 +1170,15 @@ async function runDualProviderFallbackTests() {
     );
     assert.equal(cfCalls, 1);
     assert.equal(fallback503.provider, "cloudflare");
+    assert.equal(fallback503.model, "@cf/google/gemma-4-26b-a4b-it");
     assert.equal(fallback503.fallbackUsed, true);
     assert.equal(fallback503.fallbackReason, "transient");
+    assert.ok(fallback503.answer.includes("[Security_Policy.pdf, p. 4]"));
+
+    // 3b. Stale deprecated CLOUDFLARE_CHAT_MODEL env override auto-upgrades to Gemma 4
+    process.env.CLOUDFLARE_CHAT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8";
+    assert.equal(getActiveChatModel("cloudflare"), "@cf/google/gemma-4-26b-a4b-it");
+    delete process.env.CLOUDFLARE_CHAT_MODEL;
 
     // 4. Gemini provider timeout -> automatic Cloudflare fallback (plus non-RAG fallback)
     clearGeminiCachesForTest();
@@ -1243,7 +1266,7 @@ async function runDualProviderFallbackTests() {
     setCloudflareFetchForTest(async () => {
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: "HTTP fallback response from Cloudflare Llama 3.1." } }],
+          choices: [{ message: { content: "HTTP fallback response from Cloudflare Gemma 4." } }],
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
@@ -1271,7 +1294,7 @@ async function runDualProviderFallbackTests() {
       assert.equal(healthBody.ai_provider, "gemini");
       assert.equal(healthBody.fallback_provider, "cloudflare");
       assert.equal(healthBody.fallback_configured, true);
-      assert.equal(healthBody.fallback_chat_model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+      assert.equal(healthBody.fallback_chat_model, "@cf/google/gemma-4-26b-a4b-it");
 
       const compareResp = await realFetch(`${baseUrl}/api/chat/compare`, {
         method: "POST",
@@ -1285,9 +1308,9 @@ async function runDualProviderFallbackTests() {
       };
       assert.equal(compareBody.fallback_used, true);
       assert.equal(compareBody.without_rag.ai_provider, "cloudflare");
-      assert.equal(compareBody.without_rag.model, "@cf/meta/llama-3.1-8b-instruct-fp8");
+      assert.equal(compareBody.without_rag.model, "@cf/google/gemma-4-26b-a4b-it");
       assert.equal(compareBody.without_rag.fallback_used, true);
-      assert.equal(compareBody.without_rag.answer, "HTTP fallback response from Cloudflare Llama 3.1.");
+      assert.equal(compareBody.without_rag.answer, "HTTP fallback response from Cloudflare Gemma 4.");
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve()))

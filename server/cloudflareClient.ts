@@ -1,9 +1,14 @@
 import { RetrievedChunkRef } from "./geminiClient.js";
 
-export const CLOUDFLARE_CHAT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8";
+export const CLOUDFLARE_CHAT_MODEL = "@cf/google/gemma-4-26b-a4b-it";
 export const CLOUDFLARE_EMBEDDING_MODEL = "@cf/baai/bge-m3";
-export const CLOUDFLARE_CHAT_MAX_TOKENS = 1024;
+export const CLOUDFLARE_CHAT_MAX_TOKENS = 2048;
 export const CLOUDFLARE_CHAT_TEMPERATURE = 0.15;
+
+const DEPRECATED_CLOUDFLARE_CHAT_MODELS = new Set([
+  "@cf/meta/llama-3.1-8b-instruct-fp8",
+  "@cf/meta/llama-3.1-8b-instruct",
+]);
 
 const CF_GENERATE_TIMEOUT_MS = 22_000;
 const CF_GENERATE_TOTAL_BUDGET_MS = 45_000;
@@ -37,7 +42,13 @@ const KNOWN_CLOUDFLARE_EMBEDDING_DIMS: Record<string, number> = {
 
 export function getCloudflareChatModel(): string {
   const configured = process.env.CLOUDFLARE_CHAT_MODEL?.trim();
-  return configured || CLOUDFLARE_CHAT_MODEL;
+  if (!configured) {
+    return CLOUDFLARE_CHAT_MODEL;
+  }
+  if (DEPRECATED_CLOUDFLARE_CHAT_MODELS.has(configured.toLowerCase())) {
+    return CLOUDFLARE_CHAT_MODEL;
+  }
+  return configured;
 }
 
 export function getCloudflareEmbeddingModel(): string {
@@ -416,14 +427,17 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
 
     if (
       err.status === 404 ||
+      err.status === 410 ||
       codes.has(7000) ||
+      codes.has(5028) ||
+      lower.includes("deprecated") ||
       lower.includes("no such model") ||
       lower.includes("model not found") ||
       (err.status === 400 && lower.includes("model"))
     ) {
       return {
         kind: "not_found",
-        statusCode: 400,
+        statusCode: err.status === 410 ? 410 : 400,
         retryable: false,
         rawMessage: err.message,
       };
@@ -527,7 +541,7 @@ export function formatCloudflareError(err: unknown): { status: number; message: 
       };
     case "not_found":
       return {
-        status: 400,
+        status: classified.statusCode || 400,
         message: `Configured Cloudflare Workers AI model is unavailable (${sanitizeCloudflareErrorMessage(classified.rawMessage) || "check CLOUDFLARE_CHAT_MODEL / CLOUDFLARE_EMBEDDING_MODEL"}).`,
       };
     case "quota_exhausted":
@@ -948,6 +962,7 @@ export async function generateCloudflareRagAnswer(
         ],
         max_tokens: CLOUDFLARE_CHAT_MAX_TOKENS,
         temperature: CLOUDFLARE_CHAT_TEMPERATURE,
+        stream: false,
       },
       {
         maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
@@ -993,6 +1008,7 @@ export async function generateCloudflareWithoutRagAnswer(
         ],
         max_tokens: CLOUDFLARE_CHAT_MAX_TOKENS,
         temperature: CLOUDFLARE_CHAT_TEMPERATURE,
+        stream: false,
       },
       {
         maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
