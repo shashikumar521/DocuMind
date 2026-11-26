@@ -1,0 +1,348 @@
+export interface RetrievedChunkRef {
+  rank: number;
+  chunk_id: string;
+  document_id: string;
+  filename: string;
+  page_number: number;
+  text: string;
+  distance: number;
+  similarity: number;
+}
+
+export const DEFAULT_RAG_TOP_K = 3;
+export const RAG_MAX_CHUNK_CHARS = 1_800;
+export const RAG_MAX_CONTEXT_CHARS = 5_500;
+export const RAG_MAX_OUTPUT_TOKENS = 768;
+export const DOC_COMPARE_MAX_CHUNK_CHARS = 1_400;
+export const DOC_COMPARE_MAX_CONTEXT_CHARS = 6_400;
+
+export interface OptimizedPassage {
+  chunk: RetrievedChunkRef;
+  promptText: string;
+}
+
+export interface OptimizedPromptResult {
+  promptPreview: string;
+  passages: OptimizedPassage[];
+  originalChunksCount: number;
+  deduplicatedChunksCount: number;
+  contextChars: number;
+}
+
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function trimSentenceBoundary(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const slice = text.slice(0, maxChars);
+  const lastSpace = slice.lastIndexOf(" ");
+  const cutoff = lastSpace > Math.floor(maxChars * 0.7) ? lastSpace : maxChars;
+  return `${slice.slice(0, cutoff).trimEnd()}...`;
+}
+
+/**
+ * Removes overlapping tail/head words when consecutive chunks from the same
+ * document & page share a sliding-window overlap (e.g., 100-word chunk overlap).
+ */
+function stripSamePageOverlap(
+  candidateWords: string[],
+  existingPageWordLists: string[][]
+): string[] {
+  const MIN_OVERLAP_WORDS = 12;
+  let words = candidateWords;
+
+  for (const prevWords of existingPageWordLists) {
+    if (words.length < MIN_OVERLAP_WORDS || prevWords.length < MIN_OVERLAP_WORDS) {
+      continue;
+    }
+
+    const maxCheck = Math.min(prevWords.length, words.length, 160);
+
+    // Case 1: previous chunk tail overlaps candidate chunk head
+    for (let overlap = maxCheck; overlap >= MIN_OVERLAP_WORDS; overlap--) {
+      let matches = true;
+      const prevStart = prevWords.length - overlap;
+      for (let i = 0; i < overlap; i++) {
+        if (prevWords[prevStart + i].toLowerCase() !== words[i].toLowerCase()) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        words = words.slice(overlap);
+        break;
+      }
+    }
+
+    if (words.length < 4) {
+      return [];
+    }
+
+    // Case 2: candidate chunk tail overlaps previous chunk head
+    const maxCheckTail = Math.min(prevWords.length, words.length, 160);
+    for (let overlap = maxCheckTail; overlap >= MIN_OVERLAP_WORDS; overlap--) {
+      let matches = true;
+      const candStart = words.length - overlap;
+      for (let i = 0; i < overlap; i++) {
+        if (words[candStart + i].toLowerCase() !== prevWords[i].toLowerCase()) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        words = words.slice(0, candStart);
+        break;
+      }
+    }
+  }
+
+  return words;
+}
+
+function buildShingles(words: string[], size = 5): Set<string> {
+  const set = new Set<string>();
+  if (words.length < size) return set;
+  for (let i = 0; i <= words.length - size; i++) {
+    set.add(
+      words
+        .slice(i, i + size)
+        .map((w) => w.toLowerCase())
+        .join(" ")
+    );
+  }
+  return set;
+}
+
+function hasHighShingleOverlap(candidateShingles: Set<string>, keptShinglesList: Set<string>[]): boolean {
+  if (candidateShingles.size === 0) return false;
+  for (const kept of keptShinglesList) {
+    if (kept.size === 0) continue;
+    let shared = 0;
+    for (const s of candidateShingles) {
+      if (kept.has(s)) shared += 1;
+    }
+    if (shared / candidateShingles.size >= 0.75) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function optimizeChunksForPrompt(chunks: RetrievedChunkRef[]): OptimizedPassage[] {
+  const selected: OptimizedPassage[] = [];
+  const keptNormalized: string[] = [];
+  const keptShingles: Set<string>[] = [];
+  const pageWordsMap = new Map<string, string[][]>();
+
+  for (const chunk of chunks) {
+    const cleaned = normalizeWhitespace(chunk.text);
+    if (!cleaned) continue;
+
+    const lowerCleaned = cleaned.toLowerCase();
+    const isDuplicateOrContained = keptNormalized.some(
+      (prev) =>
+        prev === lowerCleaned ||
+        (lowerCleaned.length >= 40 && prev.includes(lowerCleaned))
+    );
+    if (isDuplicateOrContained) {
+      continue;
+    }
+
+    const pageKey = `${chunk.document_id}:${chunk.page_number}`;
+    const existingPageWords = pageWordsMap.get(pageKey) ?? [];
+    let words = cleaned.split(" ");
+
+    if (existingPageWords.length > 0) {
+      const stripped = stripSamePageOverlap(words, existingPageWords);
+      if (stripped.length === 0) {
+        continue;
+      }
+      words = stripped;
+    }
+
+    const effectiveText = trimSentenceBoundary(words.join(" "), RAG_MAX_CHUNK_CHARS);
+    const effectiveWords = effectiveText.split(" ");
+    const candidateShingles = buildShingles(effectiveWords);
+
+    if (selected.length > 0 && hasHighShingleOverlap(candidateShingles, keptShingles)) {
+      continue;
+    }
+
+    selected.push({ chunk, promptText: effectiveText });
+    keptNormalized.push(lowerCleaned);
+    if (candidateShingles.size > 0) {
+      keptShingles.push(candidateShingles);
+    }
+    pageWordsMap.set(pageKey, [...existingPageWords, cleaned.split(" ")]);
+  }
+
+  return selected;
+}
+
+export function buildOptimizedRagPrompt(
+  question: string,
+  chunks: RetrievedChunkRef[]
+): OptimizedPromptResult {
+  const optimized = optimizeChunksForPrompt(chunks);
+  let contextBlock = "(No matching document passages were retrieved.)";
+  const included: OptimizedPassage[] = [];
+
+  if (optimized.length > 0) {
+    const formattedPassages: string[] = [];
+    let totalChars = 0;
+
+    for (const item of optimized) {
+      const { chunk, promptText } = item;
+      const entry = `[Passage ${formattedPassages.length + 1} | File: ${chunk.filename} | Page: ${chunk.page_number} | Chunk ID: ${chunk.chunk_id}]\n${promptText}`;
+      if (totalChars + entry.length > RAG_MAX_CONTEXT_CHARS && formattedPassages.length > 0) {
+        break;
+      }
+      formattedPassages.push(entry);
+      included.push(item);
+      totalChars += entry.length;
+    }
+    contextBlock = formattedPassages.join("\n\n---\n\n");
+  }
+
+  const promptPreview = `<retrieved_context>\n${contextBlock}\n</retrieved_context>\n\nUser Question: ${question}`;
+  return {
+    promptPreview,
+    passages: included,
+    originalChunksCount: chunks.length,
+    deduplicatedChunksCount: included.length,
+    contextChars: contextBlock.length,
+  };
+}
+
+export function sampleRepresentativeChunks(
+  chunks: RetrievedChunkRef[],
+  maxCount: number
+): RetrievedChunkRef[] {
+  if (maxCount <= 0 || chunks.length === 0) return [];
+  if (chunks.length <= maxCount) return chunks;
+  if (maxCount === 1) return [chunks[0]];
+
+  const sampled: RetrievedChunkRef[] = [];
+  const usedIndices = new Set<number>();
+  for (let i = 0; i < maxCount; i++) {
+    const idx = Math.round((i * (chunks.length - 1)) / (maxCount - 1));
+    if (!usedIndices.has(idx)) {
+      usedIndices.add(idx);
+      sampled.push(chunks[idx]);
+    }
+  }
+  return sampled;
+}
+
+export function buildDocumentComparisonPrompt(params: {
+  question?: string;
+  documents: Array<{ id: string; filename: string; pages: number }>;
+  chunksByDocument: Map<string, RetrievedChunkRef[]>;
+}): OptimizedPromptResult {
+  const { question, documents, chunksByDocument } = params;
+  const docCount = Math.max(1, documents.length);
+  const sectionSeparator = "\n\n====================\n\n";
+  const passageSeparator = "\n\n---\n\n";
+  const maxOverhead = Math.max(0, (docCount - 1) * sectionSeparator.length);
+  const usableBudget = Math.max(1_200, DOC_COMPARE_MAX_CONTEXT_CHARS - maxOverhead);
+  const perDocBudget = Math.max(800, Math.floor(usableBudget / docCount));
+
+  let originalChunksCount = 0;
+  const included: OptimizedPassage[] = [];
+  const docSections: string[] = [];
+  let runningChars = 0;
+  let globalPassageNum = 1;
+
+  for (let dIdx = 0; dIdx < documents.length; dIdx++) {
+    const doc = documents[dIdx];
+    const rawChunks = chunksByDocument.get(doc.id) ?? [];
+    originalChunksCount += rawChunks.length;
+
+    const optimized = optimizeChunksForPrompt(rawChunks);
+    const header = `=== Document ${dIdx + 1}: ${doc.filename} (${doc.pages || "?"} pages) ===`;
+    const remainingTotal =
+      DOC_COMPARE_MAX_CONTEXT_CHARS -
+      runningChars -
+      (docSections.length > 0 ? sectionSeparator.length : 0);
+    const docBudget = Math.min(perDocBudget, Math.max(header.length + 320, remainingTotal));
+
+    const formattedPassages: string[] = [];
+    let docChars = header.length;
+
+    for (const item of optimized) {
+      const boundedText = trimSentenceBoundary(item.promptText, DOC_COMPARE_MAX_CHUNK_CHARS);
+      const passageHeader = `[Passage ${globalPassageNum} | File: ${item.chunk.filename} | Page: ${item.chunk.page_number} | Chunk ID: ${item.chunk.chunk_id}]\n`;
+      let entry = `${passageHeader}${boundedText}`;
+      const sepCost = formattedPassages.length > 0 ? passageSeparator.length : 1;
+
+      if (docChars + sepCost + entry.length > docBudget) {
+        if (formattedPassages.length === 0) {
+          const allowedTextChars = Math.max(120, docBudget - docChars - sepCost - passageHeader.length);
+          entry = `${passageHeader}${trimSentenceBoundary(boundedText, allowedTextChars)}`;
+        } else {
+          break;
+        }
+      }
+
+      formattedPassages.push(entry);
+      included.push({ chunk: item.chunk, promptText: boundedText });
+      docChars += sepCost + entry.length;
+      globalPassageNum += 1;
+    }
+
+    const sectionBody =
+      formattedPassages.length > 0
+        ? `${header}\n${formattedPassages.join(passageSeparator)}`
+        : `${header}\n(No indexed passages found for this document.)`;
+
+    if (docSections.length > 0) runningChars += sectionSeparator.length;
+    runningChars += sectionBody.length;
+    docSections.push(sectionBody);
+  }
+
+  const contextBlock =
+    docSections.length > 0
+      ? docSections.join(sectionSeparator)
+      : "(No matching document passages were retrieved.)";
+
+  const focusQuestion =
+    question?.trim() ||
+    "Provide a clear, structured side-by-side comparison highlighting key similarities, key differences, and document-specific details.";
+
+  const promptPreview = `<retrieved_context>\n${contextBlock}\n</retrieved_context>\n\nComparison Focus: ${focusQuestion}`;
+  return {
+    promptPreview,
+    passages: included,
+    originalChunksCount,
+    deduplicatedChunksCount: included.length,
+    contextChars: contextBlock.length,
+  };
+}
+
+export function redactSecrets(message: string): string {
+  let sanitized = String(message ?? "");
+  const secretEnvKeys = [
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_ACCOUNT_ID",
+    "DATABASE_URL",
+    "BLOB_READ_WRITE_TOKEN",
+  ];
+
+  for (const key of secretEnvKeys) {
+    const raw = process.env[key]?.trim();
+    if (!raw) continue;
+    const strippedBearer = raw.replace(/^Bearer\s+/i, "").trim();
+    for (const candidate of [raw, strippedBearer]) {
+      if (candidate.length >= 6 && sanitized.includes(candidate)) {
+        sanitized = sanitized.split(candidate).join("***");
+      }
+    }
+  }
+
+  return sanitized
+    .replace(/([?&]key=)[^&\s'"`]+/gi, "$1***")
+    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer ***")
+    .replace(/(https?:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/)[^/\s]+/gi, "$1***")
+    .replace(/postgres(?:ql)?:\/\/[^\s'"`]+@/gi, "postgresql://***@");
+}
