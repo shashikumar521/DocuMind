@@ -29,21 +29,24 @@ jobs:
 
     steps:
       - name: Verify target branch and explicit confirmation
+        env:
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_CONFIRM_PREVIEW_WRITE: ${{ inputs.confirm_preview_write }}
         run: |
           if [ "${GITHUB_REF}" != "refs/heads/preview-db-test" ]; then
             echo "::error::Refusing to run on branch '${GITHUB_REF_NAME}'. This workflow only targets 'preview-db-test'."
             exit 1
           fi
-          if [ "${{ inputs.mode }}" = "execute_migration_and_backfill" ]; then
-            if [ "${{ inputs.confirm_preview_write }}" != "MIGRATE_PREVIEW_NEONDB" ]; then
+          if [ "${INPUT_MODE}" = "execute_migration_and_backfill" ]; then
+            if [ "${INPUT_CONFIRM_PREVIEW_WRITE}" != "MIGRATE_PREVIEW_NEONDB" ]; then
               echo "::error::Missing or invalid confirm_preview_write phrase. Type MIGRATE_PREVIEW_NEONDB to execute Preview migration and backfill."
               exit 1
             fi
-          elif [ "${{ inputs.mode }}" != "dry_run" ]; then
-            echo "::error::Unsupported mode '${{ inputs.mode }}'."
+          elif [ "${INPUT_MODE}" != "dry_run" ]; then
+            echo "::error::Unsupported mode '${INPUT_MODE}'."
             exit 1
           fi
-          echo "Branch verified: ${GITHUB_REF_NAME} (mode: ${{ inputs.mode }})"
+          echo "Branch verified: ${GITHUB_REF_NAME} (mode: ${INPUT_MODE})"
 
       - name: Checkout preview-db-test
         uses: actions/checkout@v4
