@@ -1,3 +1,4 @@
+
 name: DocuMind Preview Re-embed (Dry Run Only)
 
 on:
@@ -28,10 +29,12 @@ jobs:
             echo "::error::Refusing to run on branch '${GITHUB_REF_NAME}'. This workflow only targets 'preview-db-test'."
             exit 1
           fi
+
           if [ "${{ inputs.mode }}" != "dry_run" ]; then
             echo "::error::Unsupported mode '${{ inputs.mode }}'. Only 'dry_run' is enabled until explicit approval."
             exit 1
           fi
+
           echo "Branch verified: ${GITHUB_REF_NAME} (mode: dry_run, no writes allowed)"
 
       - name: Checkout preview-db-test
@@ -56,6 +59,7 @@ jobs:
           PREVIEW_DATABASE_HOST: ${{ secrets.PREVIEW_DATABASE_HOST }}
         run: |
           missing=0
+
           for var in PREVIEW_DATABASE_URL PREVIEW_DATABASE_HOST; do
             val="$(printenv "$var" || true)"
             if [ -z "$val" ]; then
@@ -63,9 +67,11 @@ jobs:
               missing=1
             fi
           done
+
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
+
           echo "All required Neon Preview database secrets are configured (Cloudflare credentials not required for dry-run)."
 
       - name: Run read-only re-embedding dry-run on Neon Preview (neondb)
