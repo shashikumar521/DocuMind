@@ -1,4 +1,4 @@
-```yaml
+
 name: DocuMind Preview Re-embed (Dry Run Only)
 
 on:
@@ -29,10 +29,12 @@ jobs:
             echo "::error::Refusing to run on branch '${GITHUB_REF_NAME}'. This workflow only targets 'preview-db-test'."
             exit 1
           fi
+
           if [ "${{ inputs.mode }}" != "dry_run" ]; then
             echo "::error::Unsupported mode. Only dry_run is enabled."
             exit 1
           fi
+
           echo "Branch verified: ${GITHUB_REF_NAME} (dry_run only)"
 
       - name: Checkout preview-db-test
@@ -55,21 +57,22 @@ jobs:
         env:
           PREVIEW_DATABASE_URL: ${{ secrets.PREVIEW_DATABASE_URL }}
           PREVIEW_DATABASE_HOST: ${{ secrets.PREVIEW_DATABASE_HOST }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           missing=0
-          for var in PREVIEW_DATABASE_URL PREVIEW_DATABASE_HOST CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN; do
+
+          for var in PREVIEW_DATABASE_URL PREVIEW_DATABASE_HOST; do
             val="$(printenv "$var" || true)"
             if [ -z "$val" ]; then
               echo "::error::Missing required GitHub 'preview' Environment secret: $var"
               missing=1
             fi
           done
+
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
-          echo "All required Preview secrets are configured."
+
+          echo "Required Preview database secrets are configured."
 
       - name: Run read-only Cloudflare re-embedding dry-run
         env:
@@ -78,11 +81,8 @@ jobs:
           PREVIEW_DATABASE_HOST: ${{ secrets.PREVIEW_DATABASE_HOST }}
           PREVIEW_EXPECTED_DATABASE_HOST: ${{ secrets.PREVIEW_DATABASE_HOST }}
           PREVIEW_EXPECTED_DATABASE_NAME: neondb
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           npm run reembed:cloudflare -- \
             --allow-preview \
             --expected-host="${PREVIEW_DATABASE_HOST}" \
             --expected-db=neondb
-```
