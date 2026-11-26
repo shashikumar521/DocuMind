@@ -31,6 +31,7 @@ export interface BackfillCliArgs {
 export interface ReembedCloudflareStorage {
   inspectDatabaseIdentity(): Promise<DatabaseIdentity>;
   getChunkMigrationStats(): Promise<ChunkMigrationStats>;
+  inspectChunkMigrationStatsReadOnly?(): Promise<ChunkMigrationStats>;
   fetchChunksNeedingCloudflareEmbedding(
     limit: number
   ): Promise<Array<{ chunk_id: string; text: string }>>;
@@ -280,7 +281,17 @@ export async function runReembedCloudflare(
     const identity = await storage.inspectDatabaseIdentity();
     validatePostConnectionIdentity(args, identity, targetEnv, env);
 
-    const stats = await storage.getChunkMigrationStats();
+    let stats: ChunkMigrationStats;
+    if (!args.execute) {
+      if (typeof storage.inspectChunkMigrationStatsReadOnly !== "function") {
+        throw new Error(
+          "Dry-run aborted: storage adapter does not implement inspectChunkMigrationStatsReadOnly()."
+        );
+      }
+      stats = await storage.inspectChunkMigrationStatsReadOnly();
+    } else {
+      stats = await storage.getChunkMigrationStats();
+    }
     const model = getCloudflareEmbeddingModel();
     const expectedDims = getCloudflareExpectedEmbeddingDimensions();
 

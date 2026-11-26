@@ -1,0 +1,82 @@
+name: DocuMind Preview Re-embed (Dry Run Only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Execution mode (strictly read-only dry_run until explicitly approved)"
+        type: choice
+        required: true
+        default: dry_run
+        options:
+          - dry_run
+
+permissions:
+  contents: read
+
+jobs:
+  preview-reembed-dry-run:
+    name: Neon Preview Dry-Run Check (neondb)
+    runs-on: ubuntu-latest
+    environment: preview
+    if: github.ref == 'refs/heads/preview-db-test'
+
+    steps:
+      - name: Verify target branch is preview-db-test
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/preview-db-test" ]; then
+            echo "::error::Refusing to run on branch '${GITHUB_REF_NAME}'. This workflow only targets 'preview-db-test'."
+            exit 1
+          fi
+          if [ "${{ inputs.mode }}" != "dry_run" ]; then
+            echo "::error::Unsupported mode '${{ inputs.mode }}'. Only 'dry_run' is enabled until explicit approval."
+            exit 1
+          fi
+          echo "Branch verified: ${GITHUB_REF_NAME} (mode: dry_run, no writes allowed)"
+
+      - name: Checkout preview-db-test
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Validate required Preview database secrets (no secret output)
+        env:
+          PREVIEW_DATABASE_URL: ${{ secrets.PREVIEW_DATABASE_URL }}
+          PREVIEW_DATABASE_HOST: ${{ secrets.PREVIEW_DATABASE_HOST }}
+        run: |
+          missing=0
+          for var in PREVIEW_DATABASE_URL PREVIEW_DATABASE_HOST; do
+            val="$(printenv "$var" || true)"
+            if [ -z "$val" ]; then
+              echo "::error::Missing required GitHub 'preview' Environment secret: $var"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "All required Neon Preview database secrets are configured (Cloudflare credentials not required for dry-run)."
+
+      - name: Run read-only re-embedding dry-run on Neon Preview (neondb)
+        env:
+          TARGET_ENV: preview
+          DATABASE_URL: ${{ secrets.PREVIEW_DATABASE_URL }}
+          PREVIEW_DATABASE_HOST: ${{ secrets.PREVIEW_DATABASE_HOST }}
+          PREVIEW_EXPECTED_DATABASE_HOST: ${{ secrets.PREVIEW_DATABASE_HOST }}
+          PREVIEW_EXPECTED_DATABASE_NAME: neondb
+        run: |
+          npm run reembed:cloudflare -- \
+            --allow-preview \
+            --expected-host="${PREVIEW_DATABASE_HOST}" \
+            --expected-db=neondb

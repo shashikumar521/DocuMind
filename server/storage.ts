@@ -964,6 +964,100 @@ export class PostgresBlobStorage implements StorageAdapter {
     };
   }
 
+  async inspectChunkMigrationStatsReadOnly(): Promise<ChunkMigrationStats> {
+    assertPreviewDatabaseIsolation(this.databaseUrl);
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN READ ONLY");
+
+      const extRes = await client.query(
+        "SELECT 1 FROM pg_extension WHERE extname = 'vector' LIMIT 1"
+      );
+      const pgVectorEnabled = (extRes.rowCount ?? extRes.rows.length) > 0;
+
+      const tableRes = await client.query(
+        `SELECT 1
+         FROM information_schema.tables
+         WHERE table_schema = current_schema()
+           AND table_name = 'documind_chunks'
+         LIMIT 1`
+      );
+      const tableExists = (tableRes.rowCount ?? tableRes.rows.length) > 0;
+
+      if (!tableExists) {
+        await client.query("COMMIT");
+        return {
+          total_chunks: 0,
+          legacy_chunks: 0,
+          cloudflare_chunks: 0,
+          missing_cloudflare_chunks: 0,
+          has_embedding_cf_column: false,
+          has_embedding_model_column: false,
+          has_embedding_cf_model_column: false,
+          embedding_nullable: false,
+          pgvector_enabled: pgVectorEnabled,
+        };
+      }
+
+      const colRes = await client.query<{ column_name: string; is_nullable: string }>(
+        `SELECT column_name, is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'documind_chunks'`
+      );
+      const colMap = new Map(
+        colRes.rows.map((r) => [String(r.column_name), String(r.is_nullable).toUpperCase() === "YES"])
+      );
+      const hasEmbeddingModelColumn = colMap.has("embedding_model");
+      const hasEmbeddingCfColumn = colMap.has("embedding_cf");
+      const hasEmbeddingCfModelColumn = colMap.has("embedding_cf_model");
+      const embeddingNullable = colMap.get("embedding") ?? false;
+      const hasLegacyEmbeddingColumn = colMap.has("embedding");
+
+      const legacySelect = hasLegacyEmbeddingColumn
+        ? "COUNT(*) FILTER (WHERE embedding IS NOT NULL)::int AS legacy_chunks"
+        : "0::int AS legacy_chunks";
+      const cfSelect = hasEmbeddingCfColumn
+        ? `COUNT(*) FILTER (WHERE embedding_cf IS NOT NULL)::int AS cloudflare_chunks,
+           COUNT(*) FILTER (WHERE embedding_cf IS NULL)::int AS missing_cloudflare_chunks`
+        : `0::int AS cloudflare_chunks,
+           COUNT(*)::int AS missing_cloudflare_chunks`;
+
+      const res = await client.query<{
+        total_chunks: number;
+        legacy_chunks: number;
+        cloudflare_chunks: number;
+        missing_cloudflare_chunks: number;
+      }>(
+        `SELECT
+           COUNT(*)::int AS total_chunks,
+           ${legacySelect},
+           ${cfSelect}
+         FROM documind_chunks`
+      );
+      await client.query("COMMIT");
+
+      const row = res.rows[0];
+      return {
+        total_chunks: Number(row?.total_chunks ?? 0),
+        legacy_chunks: Number(row?.legacy_chunks ?? 0),
+        cloudflare_chunks: Number(row?.cloudflare_chunks ?? 0),
+        missing_cloudflare_chunks: Number(row?.missing_cloudflare_chunks ?? 0),
+        has_embedding_cf_column: hasEmbeddingCfColumn,
+        has_embedding_model_column: hasEmbeddingModelColumn,
+        has_embedding_cf_model_column: hasEmbeddingCfModelColumn,
+        embedding_nullable: embeddingNullable,
+        pgvector_enabled: pgVectorEnabled,
+      };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async fetchChunksNeedingCloudflareEmbedding(
     limit: number
   ): Promise<Array<{ chunk_id: string; text: string }>> {

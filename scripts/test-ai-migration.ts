@@ -74,9 +74,13 @@ function createInMemoryPostgresTestPool(options: {
   serverVersion?: string;
   initialChunks?: TestChunkRow[];
   initialDocs?: DocumentRecord[];
+  hasChunksTable?: boolean;
+  pgVectorEnabled?: boolean;
 }) {
   const rows: TestChunkRow[] = (options.initialChunks ?? []).map((r) => ({ ...r }));
   const docs: DocumentRecord[] = (options.initialDocs ?? []).map((d) => ({ ...d }));
+  const hasChunksTable = options.hasChunksTable ?? true;
+  const pgVectorEnabled = options.pgVectorEnabled ?? true;
   const executedQueries: string[] = [];
   let closed = false;
 
@@ -86,6 +90,7 @@ function createInMemoryPostgresTestPool(options: {
 
     if (
       normalized === "BEGIN" ||
+      normalized === "BEGIN READ ONLY" ||
       normalized === "COMMIT" ||
       normalized === "ROLLBACK" ||
       normalized.startsWith("CREATE EXTENSION") ||
@@ -108,7 +113,22 @@ function createInMemoryPostgresTestPool(options: {
       };
     }
 
+    if (normalized.includes("FROM pg_extension")) {
+      return pgVectorEnabled
+        ? { rows: [{ "?column?": 1 }], rowCount: 1 }
+        : { rows: [], rowCount: 0 };
+    }
+
+    if (normalized.includes("FROM information_schema.tables")) {
+      return hasChunksTable
+        ? { rows: [{ "?column?": 1 }], rowCount: 1 }
+        : { rows: [], rowCount: 0 };
+    }
+
     if (normalized.includes("FROM information_schema.columns")) {
+      if (!hasChunksTable) {
+        return { rows: [], rowCount: 0 };
+      }
       return {
         rows: [
           { column_name: "chunk_id", is_nullable: "NO" },
@@ -1028,7 +1048,194 @@ async function runStorageRetrievalAndSafetyTests() {
     );
   }
 
-  console.log("PASS: Storage retrieval, 1024d migration safety, and backfill tests passed (4/4).");
+  // 13. Strictly read-only dry-run verification (no init/bootstrapSchema, no DDL/DML writes)
+  {
+    const dryRunDb = createInMemoryPostgresTestPool({
+      databaseName: "neondb",
+      initialChunks: [
+        {
+          chunk_id: "c_legacy",
+          document_id: "doc1",
+          filename: "Legacy.pdf",
+          page_number: 1,
+          text: "Pending chunk",
+          token_count: 2,
+          embedding: "[1,0]",
+          embedding_model: "legacy-3072",
+          embedding_cf: null,
+          embedding_cf_model: null,
+        },
+        {
+          chunk_id: "c_cf",
+          document_id: "doc1",
+          filename: "Legacy.pdf",
+          page_number: 2,
+          text: "Migrated chunk",
+          token_count: 2,
+          embedding: "[1,0]",
+          embedding_model: "legacy-3072",
+          embedding_cf: JSON.stringify(unitVec(1024, 0)),
+          embedding_cf_model: "@cf/baai/bge-m3",
+        },
+      ],
+    });
+
+    const prevVercel = process.env.VERCEL;
+    const prevVercelEnv = process.env.VERCEL_ENV;
+    process.env.VERCEL = "1";
+    process.env.VERCEL_ENV = "preview";
+    try {
+      const dryRunStats = await runReembedCloudflare({
+        argv: [
+          "--allow-preview",
+          "--expected-host=ep-preview-branch.neon.tech",
+          "--expected-db=neondb",
+        ],
+        env: {
+          TARGET_ENV: "preview",
+          VERCEL_ENV: "preview",
+          DATABASE_URL: "postgresql://user:supersecret@ep-preview-branch.neon.tech/neondb",
+        },
+        createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, dryRunDb.pool),
+        logger: () => {},
+      });
+
+      assert.equal(dryRunStats.total_chunks, 2);
+      assert.equal(dryRunStats.legacy_chunks, 2);
+      assert.equal(dryRunStats.cloudflare_chunks, 1);
+      assert.equal(dryRunStats.missing_cloudflare_chunks, 1);
+      assert.equal(dryRunStats.has_embedding_cf_column, true);
+      assert.equal(dryRunStats.embedding_nullable, true);
+      assert.equal(dryRunStats.pgvector_enabled, true);
+
+      assert.ok(dryRunDb.executedQueries.includes("BEGIN READ ONLY"));
+      assert.ok(dryRunDb.executedQueries.includes("COMMIT"));
+      assert.equal(
+        dryRunDb.executedQueries.some((q) =>
+          /\b(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP)\b/i.test(q)
+        ),
+        false,
+        "Dry-run must execute zero DDL or DML write statements"
+      );
+
+      // Missing documind_chunks table is handled safely without creating tables
+      const missingTableDb = createInMemoryPostgresTestPool({
+        databaseName: "neondb",
+        hasChunksTable: false,
+      });
+      const missingStats = await new PostgresBlobStorage(
+        "postgresql://user:supersecret@ep-preview-branch.neon.tech/neondb",
+        missingTableDb.pool
+      ).inspectChunkMigrationStatsReadOnly();
+      assert.equal(missingStats.total_chunks, 0);
+      assert.equal(missingStats.has_embedding_cf_column, false);
+      assert.equal(missingStats.embedding_nullable, false);
+      assert.equal(missingStats.pgvector_enabled, true);
+      assert.equal(
+        missingTableDb.executedQueries.some((q) =>
+          /\b(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP)\b/i.test(q)
+        ),
+        false
+      );
+
+      await assert.rejects(
+        () =>
+          runReembedCloudflare({
+            argv: [
+              "--allow-preview",
+              "--expected-host=ep-preview-branch.neon.tech",
+              "--expected-db=neondb",
+            ],
+            env: {
+              TARGET_ENV: "preview",
+              DATABASE_URL: "postgresql://user:supersecret@ep-preview-branch.neon.tech/neondb",
+            },
+            createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, missingTableDb.pool),
+            logger: () => {},
+          }),
+        /Database schema is not ready/i
+      );
+      assert.equal(
+        missingTableDb.executedQueries.some((q) =>
+          /\b(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP)\b/i.test(q)
+        ),
+        false
+      );
+
+      // Dry-run refuses to fall back to getChunkMigrationStats() if read-only method is absent
+      const mockNoReadOnly = createMockBackfillStorage({
+        identity: {
+          hostname: "ep-preview-branch.neon.tech",
+          urlDatabaseName: "neondb",
+          serverDatabaseName: "neondb",
+          serverVersion: "16.4",
+        },
+        initialChunks: [{ chunk_id: "c1", text: "alpha", hasLegacy: true, hasCf: false }],
+      });
+      let getStatsCalled = false;
+      mockNoReadOnly.storage.getChunkMigrationStats = async () => {
+        getStatsCalled = true;
+        throw new Error("Should never be called in dry-run");
+      };
+      await assert.rejects(
+        () =>
+          runReembedCloudflare({
+            argv: [
+              "--allow-preview",
+              "--expected-host=ep-preview-branch.neon.tech",
+              "--expected-db=neondb",
+            ],
+            env: {
+              TARGET_ENV: "preview",
+              DATABASE_URL: "postgresql://user:supersecret@ep-preview-branch.neon.tech/neondb",
+            },
+            createStorage: () => mockNoReadOnly.storage,
+            logger: () => {},
+          }),
+        /does not implement inspectChunkMigrationStatsReadOnly/i
+      );
+      assert.equal(getStatsCalled, false);
+
+      // Dry-run still rejects Production targets before & inside read-only inspection
+      await assert.rejects(
+        () =>
+          runReembedCloudflare({
+            argv: [
+              "--allow-preview",
+              "--expected-host=ep-main-prod-mock.neon.tech",
+              "--expected-db=neondb",
+            ],
+            env: {
+              TARGET_ENV: "preview",
+              VERCEL_ENV: "preview",
+              DATABASE_URL: prodMockUrl,
+              PRODUCTION_DATABASE_HOST: "ep-main-prod-mock.neon.tech",
+            },
+            createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, dryRunDb.pool),
+            logger: () => {},
+          }),
+        /identified as Production/i
+      );
+      const prevProdHost = process.env.PRODUCTION_DATABASE_HOST;
+      process.env.PRODUCTION_DATABASE_HOST = "ep-main-prod-mock.neon.tech";
+      try {
+        await assert.rejects(
+          () => new PostgresBlobStorage(prodMockUrl, dryRunDb.pool).inspectChunkMigrationStatsReadOnly(),
+          (err) => err instanceof StorageConfigError
+        );
+      } finally {
+        if (prevProdHost === undefined) delete process.env.PRODUCTION_DATABASE_HOST;
+        else process.env.PRODUCTION_DATABASE_HOST = prevProdHost;
+      }
+    } finally {
+      if (prevVercel === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = prevVercel;
+      if (prevVercelEnv === undefined) delete process.env.VERCEL_ENV;
+      else process.env.VERCEL_ENV = prevVercelEnv;
+    }
+  }
+
+  console.log("PASS: Storage retrieval, 1024d migration safety, and backfill tests passed (5/5).");
 }
 
 async function runHttpApiAndHealthTests() {
