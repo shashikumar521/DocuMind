@@ -26,6 +26,8 @@
 -- ----------------------------------------------------------------------------
 BEGIN;
 
+CREATE EXTENSION IF NOT EXISTS vector;
+
 ALTER TABLE documind_chunks
   ADD COLUMN IF NOT EXISTS embedding_model TEXT;
 

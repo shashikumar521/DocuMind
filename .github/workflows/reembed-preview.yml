@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Execution mode (strictly read-only dry_run)"
+        description: "Execution mode (strictly read-only dry_run until explicitly approved)"
         type: choice
         required: true
         default: dry_run
@@ -31,11 +31,11 @@ jobs:
           fi
 
           if [ "${{ inputs.mode }}" != "dry_run" ]; then
-            echo "::error::Unsupported mode. Only dry_run is enabled."
+            echo "::error::Unsupported mode '${{ inputs.mode }}'. Only 'dry_run' is enabled until explicit approval."
             exit 1
           fi
 
-          echo "Branch verified: ${GITHUB_REF_NAME} (dry_run only)"
+          echo "Branch verified: ${GITHUB_REF_NAME} (mode: dry_run, no writes allowed)"
 
       - name: Checkout preview-db-test
         uses: actions/checkout@v4
@@ -53,7 +53,7 @@ jobs:
             npm install
           fi
 
-      - name: Validate required Preview environment secrets
+      - name: Validate required Preview database secrets (no secret output)
         env:
           PREVIEW_DATABASE_URL: ${{ secrets.PREVIEW_DATABASE_URL }}
           PREVIEW_DATABASE_HOST: ${{ secrets.PREVIEW_DATABASE_HOST }}
@@ -72,9 +72,9 @@ jobs:
             exit 1
           fi
 
-          echo "Required Preview database secrets are configured."
+          echo "All required Neon Preview database secrets are configured (Cloudflare credentials not required for dry-run)."
 
-      - name: Run read-only Cloudflare re-embedding dry-run
+      - name: Run read-only re-embedding dry-run on Neon Preview (neondb)
         env:
           TARGET_ENV: preview
           DATABASE_URL: ${{ secrets.PREVIEW_DATABASE_URL }}
