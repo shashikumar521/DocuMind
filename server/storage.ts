@@ -108,6 +108,7 @@ export interface StorageAdapter {
   ): Promise<RetrievedChunkRef[]>;
   getTotalChunksCount(): Promise<number>;
   getEmbeddingDimensions(): Promise<number | null>;
+  getChunkMigrationStats?(): Promise<ChunkMigrationStats>;
   recordConversation(record: ConversationRecord): Promise<void>;
   getHistory(): Promise<ConversationRecord[]>;
   clearHistory(): Promise<void>;
@@ -583,6 +584,158 @@ export class PostgresBlobStorage implements StorageAdapter {
     }
   }
 
+  private async refreshSchemaCapabilities(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const extRes = await client.query(
+        "SELECT 1 FROM pg_extension WHERE extname = 'vector' LIMIT 1"
+      );
+      this.pgVectorEnabled = (extRes.rowCount ?? extRes.rows.length) > 0;
+
+      const colRes = await client.query<{ column_name: string; is_nullable: string }>(
+        `SELECT column_name, is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'documind_chunks'`
+      );
+      const colMap = new Map(
+        colRes.rows.map((r) => [String(r.column_name), String(r.is_nullable).toUpperCase() === "YES"])
+      );
+      this.schemaCaps = {
+        hasEmbeddingModelColumn: colMap.has("embedding_model"),
+        hasEmbeddingCfColumn: colMap.has("embedding_cf"),
+        hasEmbeddingCfModelColumn: colMap.has("embedding_cf_model"),
+        embeddingNullable: colMap.get("embedding") ?? false,
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Explicitly applies migrations/001_cloudflare_embeddings.sql (Section B) in a single
+   * atomic transaction. Never called automatically at runtime startup or during dry-run.
+   */
+  async applyCloudflareEmbeddingsMigration(
+    options: { expectedDimensions?: number } = {}
+  ): Promise<ChunkMigrationStats> {
+    assertPreviewDatabaseIsolation(this.databaseUrl);
+
+    const dims =
+      typeof options.expectedDimensions === "number" &&
+      Number.isInteger(options.expectedDimensions) &&
+      options.expectedDimensions > 0
+        ? options.expectedDimensions
+        : 1024;
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      await client.query("CREATE EXTENSION IF NOT EXISTS vector;");
+
+      const tableRes = await client.query(
+        `SELECT 1
+         FROM information_schema.tables
+         WHERE table_schema = current_schema()
+           AND table_name = 'documind_chunks'
+         LIMIT 1`
+      );
+      const tableExists = (tableRes.rowCount ?? tableRes.rows.length) > 0;
+
+      if (!tableExists) {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS documind_documents (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            pages INTEGER NOT NULL DEFAULT 0,
+            chunks_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            sha256 TEXT NOT NULL,
+            blob_url TEXT,
+            blob_pathname TEXT,
+            uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+        `);
+
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS documind_chunks (
+            chunk_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES documind_documents(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL,
+            page_number INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            token_count INTEGER NOT NULL,
+            embedding vector,
+            embedding_model TEXT,
+            embedding_cf vector(${dims}),
+            embedding_cf_model TEXT
+          );
+        `);
+
+        await client.query(
+          "CREATE INDEX IF NOT EXISTS idx_documind_chunks_document_id ON documind_chunks (document_id);"
+        );
+      }
+
+      await client.query(
+        "ALTER TABLE documind_chunks ADD COLUMN IF NOT EXISTS embedding_model TEXT;"
+      );
+      await client.query(
+        "ALTER TABLE documind_chunks ALTER COLUMN embedding DROP NOT NULL;"
+      );
+      await client.query(
+        `ALTER TABLE documind_chunks ADD COLUMN IF NOT EXISTS embedding_cf vector(${dims});`
+      );
+      await client.query(
+        "ALTER TABLE documind_chunks ADD COLUMN IF NOT EXISTS embedding_cf_model TEXT;"
+      );
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    this.initPromise = null;
+    this.cachedEmbeddingDims = null;
+
+    const verifiedStats = await this.inspectChunkMigrationStatsReadOnly();
+    this.pgVectorEnabled = verifiedStats.pgvector_enabled;
+    this.schemaCaps = {
+      hasEmbeddingModelColumn: verifiedStats.has_embedding_model_column,
+      hasEmbeddingCfColumn: verifiedStats.has_embedding_cf_column,
+      hasEmbeddingCfModelColumn: verifiedStats.has_embedding_cf_model_column,
+      embeddingNullable: verifiedStats.embedding_nullable,
+    };
+
+    if (!verifiedStats.has_embedding_cf_column || !verifiedStats.embedding_nullable) {
+      throw new StorageConfigError(
+        "Explicit migration completed without required schema capabilities (`embedding_cf` column or nullable `embedding`)."
+      );
+    }
+
+    return verifiedStats;
+  }
+
+  async ensureCloudflareVectorIndex(): Promise<void> {
+    assertPreviewDatabaseIsolation(this.databaseUrl);
+    const stats = await this.inspectChunkMigrationStatsReadOnly();
+    if (!stats.pgvector_enabled || !stats.has_embedding_cf_column) {
+      return;
+    }
+    await this.pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_documind_chunks_embedding_cf_hnsw
+       ON documind_chunks USING hnsw (embedding_cf vector_cosine_ops)
+       WHERE embedding_cf IS NOT NULL;`
+    );
+  }
+
   getInfo(): StorageInfo {
     const usesBlob = hasBlobCredentials();
     const usesOidc = Boolean(getBlobStoreId() && !process.env.BLOB_READ_WRITE_TOKEN?.trim());
@@ -724,6 +877,10 @@ export class PostgresBlobStorage implements StorageAdapter {
     await this.init();
 
     if (!this.schemaCaps.hasEmbeddingCfColumn || !this.schemaCaps.embeddingNullable) {
+      await this.refreshSchemaCapabilities();
+    }
+
+    if (!this.schemaCaps.hasEmbeddingCfColumn || !this.schemaCaps.embeddingNullable) {
       throw new StorageConfigError(
         "Database migration 001_cloudflare_embeddings.sql has not been applied yet (missing nullable `embedding` or `embedding_cf` column). Run the explicit SQL migration before indexing with Cloudflare Workers AI."
       );
@@ -807,6 +964,10 @@ export class PostgresBlobStorage implements StorageAdapter {
   ): Promise<RetrievedChunkRef[]> {
     await this.init();
     const hasFilter = Array.isArray(documentIds) && documentIds.length > 0;
+
+    if (!this.schemaCaps.hasEmbeddingCfColumn) {
+      await this.refreshSchemaCapabilities();
+    }
 
     if (!this.schemaCaps.hasEmbeddingCfColumn) {
       throw new StorageConfigError(
@@ -931,6 +1092,9 @@ export class PostgresBlobStorage implements StorageAdapter {
 
   async getChunkMigrationStats(): Promise<ChunkMigrationStats> {
     await this.init();
+    if (!this.schemaCaps.hasEmbeddingCfColumn || !this.schemaCaps.embeddingNullable) {
+      await this.refreshSchemaCapabilities();
+    }
     const hasCf = this.schemaCaps.hasEmbeddingCfColumn;
     const cfSelect = hasCf
       ? `COUNT(*) FILTER (WHERE embedding_cf IS NOT NULL)::int AS cloudflare_chunks,
@@ -1059,22 +1223,38 @@ export class PostgresBlobStorage implements StorageAdapter {
   }
 
   async fetchChunksNeedingCloudflareEmbedding(
-    limit: number
+    limit: number,
+    excludeChunkIds: string[] = []
   ): Promise<Array<{ chunk_id: string; text: string }>> {
     await this.init();
+    if (!this.schemaCaps.hasEmbeddingCfColumn) {
+      await this.refreshSchemaCapabilities();
+    }
     if (!this.schemaCaps.hasEmbeddingCfColumn) {
       throw new StorageConfigError(
         "Cannot backfill Cloudflare embeddings: `embedding_cf` column does not exist. Run migrations/001_cloudflare_embeddings.sql first."
       );
     }
-    const res = await this.pool.query<{ chunk_id: string; text: string }>(
-      `SELECT chunk_id, text
-       FROM documind_chunks
-       WHERE embedding_cf IS NULL
-       ORDER BY chunk_id ASC
-       LIMIT $1`,
-      [limit]
-    );
+    const cleanedExclusions = excludeChunkIds.filter((id) => typeof id === "string" && id.length > 0);
+    const res =
+      cleanedExclusions.length > 0
+        ? await this.pool.query<{ chunk_id: string; text: string }>(
+            `SELECT chunk_id, text
+             FROM documind_chunks
+             WHERE embedding_cf IS NULL
+               AND NOT (chunk_id = ANY($2::text[]))
+             ORDER BY chunk_id ASC
+             LIMIT $1`,
+            [limit, cleanedExclusions]
+          )
+        : await this.pool.query<{ chunk_id: string; text: string }>(
+            `SELECT chunk_id, text
+             FROM documind_chunks
+             WHERE embedding_cf IS NULL
+             ORDER BY chunk_id ASC
+             LIMIT $1`,
+            [limit]
+          );
     return res.rows.map((r) => ({ chunk_id: String(r.chunk_id), text: String(r.text) }));
   }
 
@@ -1500,6 +1680,27 @@ export class LocalDevJsonStorage implements StorageAdapter {
     return null;
   }
 
+  async getChunkMigrationStats(): Promise<ChunkMigrationStats> {
+    const totalChunks = this.store.chunks.length;
+    const legacyChunks = this.store.chunks.filter(
+      (c) => Array.isArray(c.embedding) && c.embedding.length > 0
+    ).length;
+    const cloudflareChunks = this.store.chunks.filter(
+      (c) => Array.isArray(c.embedding_cf) && c.embedding_cf.length > 0
+    ).length;
+    return {
+      total_chunks: totalChunks,
+      legacy_chunks: legacyChunks,
+      cloudflare_chunks: cloudflareChunks,
+      missing_cloudflare_chunks: totalChunks - cloudflareChunks,
+      has_embedding_cf_column: true,
+      has_embedding_model_column: true,
+      has_embedding_cf_model_column: true,
+      embedding_nullable: true,
+      pgvector_enabled: false,
+    };
+  }
+
   async recordConversation(record: ConversationRecord): Promise<void> {
     this.store.conversations.push(record);
     if (this.store.conversations.length > 200) {
@@ -1582,6 +1783,7 @@ class UnconfiguredProductionStorage implements StorageAdapter {
   async searchSimilarChunks(): Promise<RetrievedChunkRef[]> { throw this.missingMessage(); }
   async getTotalChunksCount(): Promise<number> { throw this.missingMessage(); }
   async getEmbeddingDimensions(): Promise<number | null> { throw this.missingMessage(); }
+  async getChunkMigrationStats(): Promise<ChunkMigrationStats> { throw this.missingMessage(); }
   async recordConversation(): Promise<void> { throw this.missingMessage(); }
   async getHistory(): Promise<ConversationRecord[]> { throw this.missingMessage(); }
   async clearHistory(): Promise<void> { throw this.missingMessage(); }

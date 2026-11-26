@@ -9,6 +9,7 @@ import {
 } from "./aiClient.js";
 import { DEFAULT_RAG_TOP_K } from "./ragPrompt.js";
 import {
+  ChunkMigrationStats,
   ConversationRecord,
   DocumentRecord,
   getStorageAdapter,
@@ -156,6 +157,13 @@ class RagEngine {
 
   async getEmbeddingDimensions(): Promise<number | null> {
     return this.storage.getEmbeddingDimensions();
+  }
+
+  async getMigrationStatus(): Promise<ChunkMigrationStats | null> {
+    if (typeof this.storage.getChunkMigrationStats === "function") {
+      return this.storage.getChunkMigrationStats();
+    }
+    return null;
   }
 
   private async updateStatus(

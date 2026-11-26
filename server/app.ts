@@ -77,16 +77,24 @@ export function createApiApp(): Express {
 
     try {
       await ragEngine.init();
-      const [docs, chunksCount, embeddingDims, providerConnectivity] = await Promise.all([
+      const [docs, chunksCount, embeddingDims, migrationStatus, providerConnectivity] = await Promise.all([
         ragEngine.listDocuments(),
         ragEngine.getTotalChunksCount(),
         ragEngine.getEmbeddingDimensions(),
+        ragEngine.getMigrationStatus(),
         providerConnectivityPromise,
       ]);
       const indexedDocs = docs.filter((d) => d.status === "Indexed Successfully");
       const storageInfo = ragEngine.getStorageInfo();
 
-      const overallStatus = providerConnectivity.reachable ? "ok" : "degraded";
+      const schemaReady = migrationStatus
+        ? migrationStatus.has_embedding_cf_column && migrationStatus.embedding_nullable
+        : true;
+      const migrationComplete = migrationStatus
+        ? schemaReady && migrationStatus.missing_cloudflare_chunks === 0
+        : true;
+      const overallStatus =
+        providerConnectivity.reachable && schemaReady ? "ok" : "degraded";
 
       res.json({
         status: overallStatus,
@@ -101,6 +109,9 @@ export function createApiApp(): Express {
         ai_configured: aiConfigured,
         provider_status: providerConnectivity.status,
         provider_connectivity: providerConnectivity,
+        migration_ready: schemaReady,
+        migration_complete: migrationComplete,
+        migration_status: migrationStatus,
         storage_mode: storageInfo.storage_mode,
         vector_store: storageInfo.vector_store,
         object_storage: storageInfo.object_storage,

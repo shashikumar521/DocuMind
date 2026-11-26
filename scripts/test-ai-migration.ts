@@ -49,6 +49,7 @@ import {
   ReembedCloudflareStorage,
   runReembedCloudflare,
 } from "./reembed-cloudflare.js";
+import { runMigrateAndReembed } from "./migrate-and-reembed.js";
 
 function unitVec(dims: number, hotIndex: number): number[] {
   const v = new Array<number>(dims).fill(0);
@@ -76,11 +77,26 @@ function createInMemoryPostgresTestPool(options: {
   initialDocs?: DocumentRecord[];
   hasChunksTable?: boolean;
   pgVectorEnabled?: boolean;
+  hasEmbeddingCfSchema?: boolean;
+  failOnSqlSubstring?: string;
 }) {
   const rows: TestChunkRow[] = (options.initialChunks ?? []).map((r) => ({ ...r }));
   const docs: DocumentRecord[] = (options.initialDocs ?? []).map((d) => ({ ...d }));
-  const hasChunksTable = options.hasChunksTable ?? true;
-  const pgVectorEnabled = options.pgVectorEnabled ?? true;
+  let hasChunksTable = options.hasChunksTable ?? true;
+  let pgVectorEnabled = options.pgVectorEnabled ?? true;
+  let hasEmbeddingModel = options.hasEmbeddingCfSchema ?? true;
+  let hasEmbeddingCf = options.hasEmbeddingCfSchema ?? true;
+  let hasEmbeddingCfModel = options.hasEmbeddingCfSchema ?? true;
+  let embeddingNullable = options.hasEmbeddingCfSchema ?? true;
+  let snapshot: {
+    hasChunksTable: boolean;
+    pgVectorEnabled: boolean;
+    hasEmbeddingModel: boolean;
+    hasEmbeddingCf: boolean;
+    hasEmbeddingCfModel: boolean;
+    embeddingNullable: boolean;
+  } | null = null;
+
   const executedQueries: string[] = [];
   let closed = false;
 
@@ -88,16 +104,73 @@ function createInMemoryPostgresTestPool(options: {
     const normalized = sql.replace(/\s+/g, " ").trim();
     executedQueries.push(normalized);
 
+    if (options.failOnSqlSubstring && normalized.includes(options.failOnSqlSubstring)) {
+      throw new Error(`Simulated PostgreSQL error on query: ${normalized}`);
+    }
+
+    if (normalized === "BEGIN") {
+      snapshot = {
+        hasChunksTable,
+        pgVectorEnabled,
+        hasEmbeddingModel,
+        hasEmbeddingCf,
+        hasEmbeddingCfModel,
+        embeddingNullable,
+      };
+      return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized === "ROLLBACK") {
+      if (snapshot) {
+        hasChunksTable = snapshot.hasChunksTable;
+        pgVectorEnabled = snapshot.pgVectorEnabled;
+        hasEmbeddingModel = snapshot.hasEmbeddingModel;
+        hasEmbeddingCf = snapshot.hasEmbeddingCf;
+        hasEmbeddingCfModel = snapshot.hasEmbeddingCfModel;
+        embeddingNullable = snapshot.embeddingNullable;
+        snapshot = null;
+      }
+      return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized === "COMMIT") {
+      snapshot = null;
+      return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized === "BEGIN READ ONLY") {
+      return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized.startsWith("CREATE EXTENSION")) {
+      pgVectorEnabled = true;
+      return { rows: [], rowCount: 0 };
+    }
+
     if (
-      normalized === "BEGIN" ||
-      normalized === "BEGIN READ ONLY" ||
-      normalized === "COMMIT" ||
-      normalized === "ROLLBACK" ||
-      normalized.startsWith("CREATE EXTENSION") ||
       normalized.startsWith("CREATE TABLE") ||
       normalized.startsWith("CREATE INDEX") ||
       normalized.startsWith("INSERT INTO documind_meta")
     ) {
+      if (normalized.includes("CREATE TABLE IF NOT EXISTS documind_chunks")) {
+        hasChunksTable = true;
+      }
+      return { rows: [], rowCount: 0 };
+    }
+
+    if (normalized.startsWith("ALTER TABLE documind_chunks")) {
+      if (!hasChunksTable) {
+        throw new Error('relation "documind_chunks" does not exist');
+      }
+      if (normalized.includes("ADD COLUMN IF NOT EXISTS embedding_model")) {
+        hasEmbeddingModel = true;
+      } else if (normalized.includes("ALTER COLUMN embedding DROP NOT NULL")) {
+        embeddingNullable = true;
+      } else if (normalized.includes("ADD COLUMN IF NOT EXISTS embedding_cf_model")) {
+        hasEmbeddingCfModel = true;
+      } else if (normalized.includes("ADD COLUMN IF NOT EXISTS embedding_cf")) {
+        hasEmbeddingCf = true;
+      }
       return { rows: [], rowCount: 0 };
     }
 
@@ -129,20 +202,21 @@ function createInMemoryPostgresTestPool(options: {
       if (!hasChunksTable) {
         return { rows: [], rowCount: 0 };
       }
+      const cols = [
+        { column_name: "chunk_id", is_nullable: "NO" },
+        { column_name: "document_id", is_nullable: "NO" },
+        { column_name: "filename", is_nullable: "NO" },
+        { column_name: "page_number", is_nullable: "NO" },
+        { column_name: "text", is_nullable: "NO" },
+        { column_name: "token_count", is_nullable: "NO" },
+        { column_name: "embedding", is_nullable: embeddingNullable ? "YES" : "NO" },
+      ];
+      if (hasEmbeddingModel) cols.push({ column_name: "embedding_model", is_nullable: "YES" });
+      if (hasEmbeddingCf) cols.push({ column_name: "embedding_cf", is_nullable: "YES" });
+      if (hasEmbeddingCfModel) cols.push({ column_name: "embedding_cf_model", is_nullable: "YES" });
       return {
-        rows: [
-          { column_name: "chunk_id", is_nullable: "NO" },
-          { column_name: "document_id", is_nullable: "NO" },
-          { column_name: "filename", is_nullable: "NO" },
-          { column_name: "page_number", is_nullable: "NO" },
-          { column_name: "text", is_nullable: "NO" },
-          { column_name: "token_count", is_nullable: "NO" },
-          { column_name: "embedding", is_nullable: "YES" },
-          { column_name: "embedding_model", is_nullable: "YES" },
-          { column_name: "embedding_cf", is_nullable: "YES" },
-          { column_name: "embedding_cf_model", is_nullable: "YES" },
-        ],
-        rowCount: 10,
+        rows: cols,
+        rowCount: cols.length,
       };
     }
 
@@ -196,8 +270,8 @@ function createInMemoryPostgresTestPool(options: {
     if (normalized.includes("AS missing_cloudflare_chunks FROM documind_chunks")) {
       const total = rows.length;
       const legacy = rows.filter((r) => r.embedding !== null).length;
-      const cf = rows.filter((r) => r.embedding_cf !== null).length;
-      const missingCf = rows.filter((r) => r.embedding_cf === null).length;
+      const cf = hasEmbeddingCf ? rows.filter((r) => r.embedding_cf !== null).length : 0;
+      const missingCf = hasEmbeddingCf ? rows.filter((r) => r.embedding_cf === null).length : total;
       return {
         rows: [
           {
@@ -211,10 +285,11 @@ function createInMemoryPostgresTestPool(options: {
       };
     }
 
-    if (normalized.includes("WHERE embedding_cf IS NULL ORDER BY chunk_id ASC")) {
+    if (normalized.startsWith("SELECT chunk_id, text FROM documind_chunks") && normalized.includes("WHERE embedding_cf IS NULL")) {
       const limit = Number(params[0] ?? 5);
+      const excludeIds = Array.isArray(params[1]) ? new Set(params[1].map(String)) : new Set<string>();
       const pending = rows
-        .filter((r) => r.embedding_cf === null)
+        .filter((r) => r.embedding_cf === null && !excludeIds.has(r.chunk_id))
         .sort((a, b) => a.chunk_id.localeCompare(b.chunk_id))
         .slice(0, limit)
         .map((r) => ({ chunk_id: r.chunk_id, text: r.text }));
@@ -1300,6 +1375,9 @@ async function runHttpApiAndHealthTests() {
         fallback_enabled: boolean;
         provider_status: string;
         provider_connectivity: { checked: boolean; reachable: boolean; status: string };
+        migration_ready: boolean;
+        migration_complete: boolean;
+        migration_status: ChunkMigrationStats | null;
       };
       assert.equal(healthBody.status, "ok");
       assert.equal(healthBody.app_status, "ok");
@@ -1312,6 +1390,9 @@ async function runHttpApiAndHealthTests() {
       assert.equal(healthBody.provider_status, "reachable");
       assert.equal(healthBody.provider_connectivity.checked, true);
       assert.equal(healthBody.provider_connectivity.reachable, true);
+      assert.equal(healthBody.migration_ready, true);
+      assert.equal(healthBody.migration_complete, true);
+      assert.ok(healthBody.migration_status !== null);
 
       // 13b. /api/health distinguishes healthy app from unreachable Cloudflare provider
       setCloudflareFetchForTest(async (input) => {
@@ -1420,9 +1501,416 @@ async function runOptionalLiveCloudflareSmokeTest() {
   console.log("PASS: Live Cloudflare Workers AI embedding (1024d) and chat completion succeeded.");
 }
 
+async function runEndToEndMigrationAndBackfillTests() {
+  const previewUrl = "postgresql://user:supersecret@ep-preview-branch.neon.tech/neondb";
+  const prodMockUrl = "postgresql://produser:topsecret@ep-main-prod-mock.neon.tech/neondb";
+
+  // 14a. Missing embedding_cf column: retrieval reports exact migration error; dry-run stays read-only with 0 DDL/DML
+  {
+    const unmigratedDb = createInMemoryPostgresTestPool({
+      databaseName: "neondb",
+      hasEmbeddingCfSchema: false,
+      initialChunks: [
+        {
+          chunk_id: "c_old_1",
+          document_id: "doc1",
+          filename: "Legacy.pdf",
+          page_number: 1,
+          text: "First legacy chunk preserved across migration.",
+          token_count: 6,
+          embedding: JSON.stringify(unitVec(3072, 0)),
+          embedding_model: "legacy-3072",
+          embedding_cf: null,
+          embedding_cf_model: null,
+        },
+        {
+          chunk_id: "c_old_2",
+          document_id: "doc1",
+          filename: "Legacy.pdf",
+          page_number: 2,
+          text: "Second legacy chunk preserved across migration.",
+          token_count: 6,
+          embedding: JSON.stringify(unitVec(3072, 1)),
+          embedding_model: "legacy-3072",
+          embedding_cf: null,
+          embedding_cf_model: null,
+        },
+      ],
+    });
+
+    const dryRunResult = await runMigrateAndReembed({
+      argv: [
+        "--allow-preview",
+        "--expected-host=ep-preview-branch.neon.tech",
+        "--expected-db=neondb",
+      ],
+      env: {
+        TARGET_ENV: "preview",
+        VERCEL_ENV: "preview",
+        DATABASE_URL: previewUrl,
+      },
+      createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, unmigratedDb.pool),
+      logger: () => {},
+    });
+    assert.equal(dryRunResult.mode, "dry_run");
+    assert.equal(dryRunResult.schema_ready, false);
+    assert.equal(dryRunResult.migration_complete, false);
+    assert.equal(dryRunResult.final_stats.has_embedding_cf_column, false);
+    assert.equal(dryRunResult.final_stats.missing_cloudflare_chunks, 2);
+    assert.equal(
+      unmigratedDb.executedQueries.some((q) =>
+        /\b(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP)\b/i.test(q)
+      ),
+      false,
+      "migrate:cloudflare dry-run must perform zero DDL/DML writes"
+    );
+
+    const pgStorage = new PostgresBlobStorage(previewUrl, unmigratedDb.pool);
+    await assert.rejects(
+      () => pgStorage.searchSimilarChunks(unitVec(1024, 0), 3),
+      /001_cloudflare_embeddings\.sql has not been applied yet/i
+    );
+
+    // 14b. Explicit migration + backfill applies schema atomically, backfills 1024d vectors, enables retrieval, and is idempotent
+    let embedBatchCount = 0;
+    const execResult = await runMigrateAndReembed({
+      argv: [
+        "--execute",
+        "--allow-preview",
+        "--expected-host=ep-preview-branch.neon.tech",
+        "--expected-db=neondb",
+        "--batch-size=2",
+        "--retry-delay-ms=0",
+      ],
+      env: {
+        TARGET_ENV: "preview",
+        VERCEL_ENV: "preview",
+        DATABASE_URL: previewUrl,
+      },
+      createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, unmigratedDb.pool),
+      embedTexts: async (texts) => {
+        embedBatchCount += 1;
+        return texts.map((_, idx) => unitVec(1024, idx));
+      },
+      logger: () => {},
+    });
+
+    assert.equal(execResult.mode, "execute");
+    assert.equal(execResult.schema_ready, true);
+    assert.equal(execResult.migration_complete, true);
+    assert.equal(execResult.final_stats.has_embedding_cf_column, true);
+    assert.equal(execResult.final_stats.embedding_nullable, true);
+    assert.equal(execResult.final_stats.cloudflare_chunks, 2);
+    assert.equal(execResult.final_stats.missing_cloudflare_chunks, 0);
+    assert.equal(execResult.backfill?.newly_completed, 2);
+    assert.equal(execResult.backfill?.already_completed, 0);
+    assert.equal(execResult.backfill?.failures.length, 0);
+    assert.equal(embedBatchCount, 1);
+    assert.ok(
+      unmigratedDb.executedQueries.some((q) =>
+        q.includes("CREATE INDEX IF NOT EXISTS idx_documind_chunks_embedding_cf_hnsw")
+      )
+    );
+
+    // Search works immediately after migration + backfill (and existing legacy columns/rows preserved)
+    const hits = await pgStorage.searchSimilarChunks(unitVec(1024, 0), 3, undefined, {
+      provider: "cloudflare",
+      embeddingModel: "@cf/baai/bge-m3",
+    });
+    assert.equal(hits.length, 2);
+    assert.equal(unmigratedDb.rows[0].embedding !== null, true);
+
+    // Re-running explicit migration+backfill is idempotent and prevents duplicates (0 new embed calls)
+    let secondRunEmbedCalls = 0;
+    const idempotentResult = await runMigrateAndReembed({
+      argv: [
+        "--execute",
+        "--allow-preview",
+        "--expected-host=ep-preview-branch.neon.tech",
+        "--expected-db=neondb",
+      ],
+      env: {
+        TARGET_ENV: "preview",
+        VERCEL_ENV: "preview",
+        DATABASE_URL: previewUrl,
+      },
+      createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, unmigratedDb.pool),
+      embedTexts: async (texts) => {
+        secondRunEmbedCalls += 1;
+        return texts.map(() => unitVec(1024, 0));
+      },
+      logger: () => {},
+    });
+    assert.equal(secondRunEmbedCalls, 0);
+    assert.equal(idempotentResult.migration_complete, true);
+    assert.equal(idempotentResult.backfill?.already_completed, 2);
+    assert.equal(idempotentResult.backfill?.newly_completed, 0);
+  }
+
+  // 15. Production DB rejection & Preview host / current_database() validation
+  {
+    const db = createInMemoryPostgresTestPool({ databaseName: "wrong_db" });
+
+    await assert.rejects(
+      () =>
+        runMigrateAndReembed({
+          argv: [
+            "--execute",
+            "--allow-preview",
+            "--expected-host=ep-main-prod-mock.neon.tech",
+            "--expected-db=neondb",
+          ],
+          env: {
+            TARGET_ENV: "preview",
+            VERCEL_ENV: "preview",
+            DATABASE_URL: prodMockUrl,
+            PRODUCTION_DATABASE_HOST: "ep-main-prod-mock.neon.tech",
+          },
+          createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, db.pool),
+          embedTexts: async (t) => t.map(() => unitVec(1024, 0)),
+          logger: () => {},
+        }),
+      /identified as Production/i
+    );
+
+    await assert.rejects(
+      () =>
+        runMigrateAndReembed({
+          argv: [
+            "--allow-preview",
+            "--expected-host=ep-other-host.neon.tech",
+            "--expected-db=neondb",
+          ],
+          env: {
+            TARGET_ENV: "preview",
+            DATABASE_URL: previewUrl,
+          },
+          createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, db.pool),
+          logger: () => {},
+        }),
+      /Database host mismatch/i
+    );
+
+    await assert.rejects(
+      () =>
+        runMigrateAndReembed({
+          argv: [
+            "--allow-preview",
+            "--expected-host=ep-preview-branch.neon.tech",
+            "--expected-db=neondb",
+          ],
+          env: {
+            TARGET_ENV: "preview",
+            DATABASE_URL: previewUrl,
+          },
+          createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, db.pool),
+          logger: () => {},
+        }),
+      /current_database\(\) is 'wrong_db', expected 'neondb'/i
+    );
+  }
+
+  // 16. SQL Migration failure triggers ROLLBACK and aborts before any backfill
+  {
+    const failingMigrationDb = createInMemoryPostgresTestPool({
+      databaseName: "neondb",
+      hasEmbeddingCfSchema: false,
+      failOnSqlSubstring: "ADD COLUMN IF NOT EXISTS embedding_cf vector",
+      initialChunks: [
+        {
+          chunk_id: "c1",
+          document_id: "d1",
+          filename: "A.pdf",
+          page_number: 1,
+          text: "Chunk text",
+          token_count: 2,
+          embedding: "[1,0]",
+          embedding_model: "legacy-3072",
+          embedding_cf: null,
+          embedding_cf_model: null,
+        },
+      ],
+    });
+
+    let backfillCalled = false;
+    await assert.rejects(
+      () =>
+        runMigrateAndReembed({
+          argv: [
+            "--execute",
+            "--allow-preview",
+            "--expected-host=ep-preview-branch.neon.tech",
+            "--expected-db=neondb",
+          ],
+          env: {
+            TARGET_ENV: "preview",
+            VERCEL_ENV: "preview",
+            DATABASE_URL: previewUrl,
+          },
+          createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, failingMigrationDb.pool),
+          embedTexts: async (t) => {
+            backfillCalled = true;
+            return t.map(() => unitVec(1024, 0));
+          },
+          logger: () => {},
+        }),
+      /Simulated PostgreSQL error/i
+    );
+    assert.equal(backfillCalled, false);
+    assert.ok(failingMigrationDb.executedQueries.includes("ROLLBACK"));
+    const statsAfterRollback = await new PostgresBlobStorage(
+      previewUrl,
+      failingMigrationDb.pool
+    ).inspectChunkMigrationStatsReadOnly();
+    assert.equal(statsAfterRollback.has_embedding_cf_column, false);
+    assert.equal(statsAfterRollback.embedding_nullable, false);
+  }
+
+  // 17. Backfill retry, partial batch failure isolation, empty-chunk skip, duplicate prevention, and resume
+  {
+    const resumeDb = createInMemoryPostgresTestPool({
+      databaseName: "neondb",
+      hasEmbeddingCfSchema: true,
+      initialChunks: [
+        {
+          chunk_id: "c1_already",
+          document_id: "d1",
+          filename: "Doc.pdf",
+          page_number: 1,
+          text: "Already migrated",
+          token_count: 2,
+          embedding: null,
+          embedding_model: null,
+          embedding_cf: JSON.stringify(unitVec(1024, 9)),
+          embedding_cf_model: "@cf/baai/bge-m3",
+        },
+        {
+          chunk_id: "c2_empty",
+          document_id: "d1",
+          filename: "Doc.pdf",
+          page_number: 2,
+          text: "   ",
+          token_count: 0,
+          embedding: "[1,0]",
+          embedding_model: "legacy-3072",
+          embedding_cf: null,
+          embedding_cf_model: null,
+        },
+        {
+          chunk_id: "c3_retry_ok",
+          document_id: "d1",
+          filename: "Doc.pdf",
+          page_number: 3,
+          text: "Transient glitch then succeeds",
+          token_count: 4,
+          embedding: "[1,0]",
+          embedding_model: "legacy-3072",
+          embedding_cf: null,
+          embedding_cf_model: null,
+        },
+        {
+          chunk_id: "c4_partial_fail",
+          document_id: "d1",
+          filename: "Doc.pdf",
+          page_number: 4,
+          text: "Fails first run then succeeds on resume",
+          token_count: 6,
+          embedding: "[1,0]",
+          embedding_model: "legacy-3072",
+          embedding_cf: null,
+          embedding_cf_model: null,
+        },
+      ],
+    });
+
+    const embeddedTextsRun1: string[] = [];
+    let transientCalls = 0;
+    await assert.rejects(
+      () =>
+        runMigrateAndReembed({
+          argv: [
+            "--execute",
+            "--allow-preview",
+            "--expected-host=ep-preview-branch.neon.tech",
+            "--expected-db=neondb",
+            "--batch-size=4",
+            "--max-retries=1",
+            "--retry-delay-ms=0",
+          ],
+          env: {
+            TARGET_ENV: "preview",
+            VERCEL_ENV: "preview",
+            DATABASE_URL: previewUrl,
+          },
+          createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, resumeDb.pool),
+          embedTexts: async (texts) => {
+            embeddedTextsRun1.push(...texts);
+            if (texts.length > 1) {
+              throw new Error("Simulated batch 502 error");
+            }
+            if (texts[0].includes("Transient glitch")) {
+              transientCalls += 1;
+              if (transientCalls === 1) {
+                throw new Error("Transient 429 rate limit");
+              }
+              return [unitVec(1024, 3)];
+            }
+            throw new Error("Temporary failure on c4");
+          },
+          logger: () => {},
+        }),
+      /c4_partial_fail/i
+    );
+
+    // Already-migrated chunk was untouched; empty chunk skipped; c3 saved after retry; c4 remained pending
+    assert.ok(!embeddedTextsRun1.includes("Already migrated"));
+    assert.equal(resumeDb.rows[0].embedding_cf, JSON.stringify(unitVec(1024, 9)));
+    assert.ok(resumeDb.rows[2].embedding_cf !== null, "c3_retry_ok should persist after retry");
+    assert.equal(resumeDb.rows[3].embedding_cf, null, "c4_partial_fail remains pending for resume");
+
+    // Resume completes remaining non-empty chunk without re-embedding c1 or c3
+    const embeddedTextsRun2: string[] = [];
+    const resumed = await runMigrateAndReembed({
+      argv: [
+        "--execute",
+        "--allow-preview",
+        "--expected-host=ep-preview-branch.neon.tech",
+        "--expected-db=neondb",
+        "--batch-size=4",
+        "--retry-delay-ms=0",
+      ],
+      env: {
+        TARGET_ENV: "preview",
+        VERCEL_ENV: "preview",
+        DATABASE_URL: previewUrl,
+      },
+      createStorage: (dbUrl) => new PostgresBlobStorage(dbUrl, resumeDb.pool),
+      embedTexts: async (texts) => {
+        embeddedTextsRun2.push(...texts);
+        return texts.map(() => unitVec(1024, 4));
+      },
+      logger: () => {},
+    });
+
+    assert.deepEqual(embeddedTextsRun2, ["Fails first run then succeeds on resume"]);
+    assert.equal(resumed.backfill?.already_completed, 2);
+    assert.equal(resumed.backfill?.newly_completed, 1);
+    assert.equal(resumed.backfill?.completed_embeddings, 3);
+    assert.equal(resumed.backfill?.skipped_chunks, 1);
+    assert.deepEqual(resumed.backfill?.skipped_chunk_ids, ["c2_empty"]);
+    assert.equal(resumed.backfill?.failures.length, 0);
+    assert.equal(resumed.backfill?.remaining_pending, 1);
+  }
+
+  console.log(
+    "PASS: End-to-end migration, rollback safety, retry/resume, duplicate prevention, and status reporting tests passed (4/4)."
+  );
+}
+
 async function main() {
   await runCloudflareOnlyCoreTests();
   await runStorageRetrievalAndSafetyTests();
+  await runEndToEndMigrationAndBackfillTests();
   await runHttpApiAndHealthTests();
   await runOptionalLiveCloudflareSmokeTest();
 }

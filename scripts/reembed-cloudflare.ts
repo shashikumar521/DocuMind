@@ -26,14 +26,40 @@ export interface BackfillCliArgs {
   expectedHost?: string;
   expectedDb?: string;
   batchSize: number;
+  maxRetries: number;
+  retryDelayMs: number;
+}
+
+export interface BackfillFailure {
+  chunk_id: string;
+  error: string;
+}
+
+export interface BackfillSummary {
+  total_chunks: number;
+  already_completed: number;
+  newly_completed: number;
+  completed_embeddings: number;
+  skipped_chunks: number;
+  skipped_chunk_ids: string[];
+  failures: BackfillFailure[];
+  remaining_pending: number;
+  reindexed_documents: number;
+  finalized_documents: number;
+  final_stats: ChunkMigrationStats;
 }
 
 export interface ReembedCloudflareStorage {
   inspectDatabaseIdentity(): Promise<DatabaseIdentity>;
   getChunkMigrationStats(): Promise<ChunkMigrationStats>;
   inspectChunkMigrationStatsReadOnly?(): Promise<ChunkMigrationStats>;
+  applyCloudflareEmbeddingsMigration?(
+    options?: { expectedDimensions?: number }
+  ): Promise<ChunkMigrationStats>;
+  ensureCloudflareVectorIndex?(): Promise<void>;
   fetchChunksNeedingCloudflareEmbedding(
-    limit: number
+    limit: number,
+    excludeChunkIds?: string[]
   ): Promise<Array<{ chunk_id: string; text: string }>>;
   saveCloudflareChunkEmbeddings(
     items: Array<{ chunk_id: string; embedding_cf: number[]; embedding_cf_model: string }>
@@ -64,6 +90,8 @@ export function parseBackfillCliArgs(argv: string[]): BackfillCliArgs {
   let expectedHost: string | undefined;
   let expectedDb: string | undefined;
   let batchSize = 5;
+  let maxRetries = 2;
+  let retryDelayMs = 300;
 
   for (const arg of argv) {
     if (arg.startsWith("--expected-host=")) {
@@ -77,6 +105,16 @@ export function parseBackfillCliArgs(argv: string[]): BackfillCliArgs {
       if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 25) {
         batchSize = Math.floor(parsed);
       }
+    } else if (arg.startsWith("--max-retries=")) {
+      const parsed = Number(arg.slice("--max-retries=".length));
+      if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 5) {
+        maxRetries = Math.floor(parsed);
+      }
+    } else if (arg.startsWith("--retry-delay-ms=")) {
+      const parsed = Number(arg.slice("--retry-delay-ms=".length));
+      if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 5000) {
+        retryDelayMs = Math.floor(parsed);
+      }
     }
   }
 
@@ -87,10 +125,12 @@ export function parseBackfillCliArgs(argv: string[]): BackfillCliArgs {
     expectedHost,
     expectedDb,
     batchSize,
+    maxRetries,
+    retryDelayMs,
   };
 }
 
-function validatePreConnectionSafety(
+export function validatePreConnectionSafety(
   args: BackfillCliArgs,
   databaseUrl: string,
   env: NodeJS.ProcessEnv
@@ -211,7 +251,7 @@ function validatePreConnectionSafety(
   return { targetEnv };
 }
 
-function validatePostConnectionIdentity(
+export function validatePostConnectionIdentity(
   args: BackfillCliArgs,
   identity: DatabaseIdentity,
   targetEnv: "preview" | "production" | undefined,
@@ -256,6 +296,304 @@ function validatePostConnectionIdentity(
       );
     }
   }
+}
+
+function isNonRetryableEmbeddingError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = "name" in err ? String(err.name) : "";
+  if (
+    name === "CloudflareAuthError" ||
+    name === "CloudflareConfigError" ||
+    name === "CloudflareQuotaExhaustedError"
+  ) {
+    return true;
+  }
+  const statusCode =
+    "statusCode" in err && typeof err.statusCode === "number" ? err.statusCode : undefined;
+  return statusCode === 401 || statusCode === 403;
+}
+
+async function embedWithRetry(
+  texts: string[],
+  embedFn: (texts: string[]) => Promise<number[][]>,
+  expectedDims: number,
+  maxRetries: number,
+  retryDelayMs: number
+): Promise<number[][]> {
+  let attempt = 0;
+  let lastError: unknown;
+  while (attempt <= maxRetries) {
+    try {
+      const vectors = await embedFn(texts);
+      if (vectors.length !== texts.length) {
+        throw new Error(
+          `Vector count mismatch: expected ${texts.length}, got ${vectors.length}.`
+        );
+      }
+      for (let i = 0; i < vectors.length; i++) {
+        const vec = vectors[i];
+        if (!Array.isArray(vec) || vec.length !== expectedDims) {
+          throw new Error(
+            `Embedding vector at index ${i} has ${vec?.length ?? 0} dimensions instead of ${expectedDims}.`
+          );
+        }
+      }
+      return vectors;
+    } catch (err) {
+      lastError = err;
+      if (isNonRetryableEmbeddingError(err) || attempt >= maxRetries) {
+        throw err;
+      }
+      attempt += 1;
+      if (retryDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+export async function executeCloudflareBackfill(params: {
+  storage: ReembedCloudflareStorage;
+  embedFn: (texts: string[]) => Promise<number[][]>;
+  initialStats: ChunkMigrationStats;
+  batchSize: number;
+  maxRetries: number;
+  retryDelayMs: number;
+  model: string;
+  expectedDims: number;
+  logger: (line: string) => void;
+}): Promise<BackfillSummary> {
+  const {
+    storage,
+    embedFn,
+    initialStats,
+    batchSize,
+    maxRetries,
+    retryDelayMs,
+    model,
+    expectedDims,
+    logger: log,
+  } = params;
+
+  const alreadyCompleted = initialStats.cloudflare_chunks;
+  let newlyCompleted = 0;
+  let reindexedDocuments = 0;
+  let finalizedDocuments = 0;
+  let batchNumber = 0;
+
+  const excludedChunkIds: string[] = [];
+  const excludedSet = new Set<string>();
+  const skippedChunkIds: string[] = [];
+  const failures: BackfillFailure[] = [];
+
+  const markExcluded = (chunkId: string) => {
+    if (!excludedSet.has(chunkId)) {
+      excludedSet.add(chunkId);
+      excludedChunkIds.push(chunkId);
+    }
+  };
+
+  // 1. Backfill existing chunks missing 1,024-d Cloudflare vectors
+  while (true) {
+    const rawPending = await storage.fetchChunksNeedingCloudflareEmbedding(
+      batchSize,
+      excludedChunkIds
+    );
+    const pending = rawPending.filter((c) => !excludedSet.has(c.chunk_id));
+    if (pending.length === 0) {
+      break;
+    }
+
+    batchNumber += 1;
+    const validPending: Array<{ chunk_id: string; text: string }> = [];
+    for (const chunk of pending) {
+      if (!chunk.text || chunk.text.trim().length === 0) {
+        markExcluded(chunk.chunk_id);
+        skippedChunkIds.push(chunk.chunk_id);
+        log(`Batch ${batchNumber}: skipped chunk ${chunk.chunk_id} (empty text).`);
+      } else {
+        validPending.push(chunk);
+      }
+    }
+
+    if (validPending.length === 0) {
+      continue;
+    }
+
+    try {
+      const vectors = await embedWithRetry(
+        validPending.map((c) => c.text),
+        embedFn,
+        expectedDims,
+        maxRetries,
+        retryDelayMs
+      );
+      const payload = validPending.map((chunk, idx) => ({
+        chunk_id: chunk.chunk_id,
+        embedding_cf: vectors[idx],
+        embedding_cf_model: model,
+      }));
+      const updated = await storage.saveCloudflareChunkEmbeddings(payload);
+      newlyCompleted += updated;
+      for (const chunk of validPending) {
+        markExcluded(chunk.chunk_id);
+      }
+      log(
+        `Batch ${batchNumber}: updated ${updated}/${validPending.length} chunk(s) (newly completed: ${newlyCompleted}).`
+      );
+    } catch (batchErr) {
+      if (isNonRetryableEmbeddingError(batchErr)) {
+        throw batchErr;
+      }
+      // Fall back to chunk-by-chunk isolation so transient or single-chunk failures do not block the batch
+      for (const chunk of validPending) {
+        try {
+          const [vec] = await embedWithRetry(
+            [chunk.text],
+            embedFn,
+            expectedDims,
+            maxRetries,
+            retryDelayMs
+          );
+          const updated = await storage.saveCloudflareChunkEmbeddings([
+            {
+              chunk_id: chunk.chunk_id,
+              embedding_cf: vec,
+              embedding_cf_model: model,
+            },
+          ]);
+          newlyCompleted += updated;
+          markExcluded(chunk.chunk_id);
+        } catch (chunkErr) {
+          if (isNonRetryableEmbeddingError(chunkErr)) {
+            throw chunkErr;
+          }
+          const reason = chunkErr instanceof Error ? chunkErr.message : String(chunkErr);
+          markExcluded(chunk.chunk_id);
+          failures.push({ chunk_id: chunk.chunk_id, error: reason });
+          log(`Chunk ${chunk.chunk_id} failed after retries: ${reason}`);
+        }
+      }
+    }
+  }
+
+  // 2. Re-index any documents with zero stored chunks using their stored PDF files
+  if (
+    storage.fetchDocumentsWithMissingChunks &&
+    storage.getPdfBinary &&
+    storage.insertChunks &&
+    storage.updateDocument
+  ) {
+    const processedDocIds = new Set<string>();
+    while (true) {
+      const docsMissingChunks = await storage.fetchDocumentsWithMissingChunks(batchSize);
+      const nextDocs = docsMissingChunks.filter((d) => !processedDocIds.has(d.id));
+      if (nextDocs.length === 0) break;
+
+      for (const doc of nextDocs) {
+        processedDocIds.add(doc.id);
+        const binary = await storage.getPdfBinary(doc);
+        if (!binary) {
+          log(`Skipping document ${doc.id} (${doc.filename}): no stored PDF binary available.`);
+          continue;
+        }
+
+        const { totalPages, chunks: rawChunks } = await extractPdfPagesAndChunks(
+          binary.buffer,
+          doc.id,
+          doc.filename
+        );
+
+        const storedChunks: StoredChunk[] = [];
+        for (let offset = 0; offset < rawChunks.length; offset += batchSize) {
+          const slice = rawChunks.slice(offset, offset + batchSize);
+          const vecs = await embedWithRetry(
+            slice.map((c) => c.text),
+            embedFn,
+            expectedDims,
+            maxRetries,
+            retryDelayMs
+          );
+          for (let i = 0; i < slice.length; i++) {
+            storedChunks.push({
+              ...slice[i],
+              embedding: null,
+              embedding_model: null,
+              embedding_cf: vecs[i],
+              embedding_cf_model: model,
+            });
+          }
+        }
+
+        await storage.insertChunks(storedChunks, {
+          provider: "cloudflare",
+          embeddingModel: model,
+        });
+        await storage.updateDocument(doc.id, {
+          status: "Indexed Successfully",
+          progress: 100,
+          pages: totalPages,
+          chunks_count: storedChunks.length,
+          error_message: null,
+        });
+        newlyCompleted += storedChunks.length;
+        reindexedDocuments += 1;
+        log(
+          `Re-indexed document ${doc.id} (${doc.filename}) from stored PDF: ${storedChunks.length} chunks (${expectedDims}d).`
+        );
+      }
+    }
+  }
+
+  // 3. Ensure document status is marked indexed only once every chunk has valid Cloudflare vectors
+  if (storage.markCompleteDocumentsIndexed) {
+    finalizedDocuments = await storage.markCompleteDocumentsIndexed();
+    if (finalizedDocuments > 0) {
+      log(
+        `Marked ${finalizedDocuments} document(s) 'Indexed Successfully' after verifying complete Cloudflare vectors.`
+      );
+    }
+  }
+
+  const finalStats =
+    typeof storage.inspectChunkMigrationStatsReadOnly === "function"
+      ? await storage.inspectChunkMigrationStatsReadOnly()
+      : await storage.getChunkMigrationStats();
+
+  if (
+    failures.length === 0 &&
+    finalStats.missing_cloudflare_chunks === 0 &&
+    typeof storage.ensureCloudflareVectorIndex === "function"
+  ) {
+    await storage.ensureCloudflareVectorIndex();
+  }
+
+  const summary: BackfillSummary = {
+    total_chunks: finalStats.total_chunks,
+    already_completed: alreadyCompleted,
+    newly_completed: newlyCompleted,
+    completed_embeddings: finalStats.cloudflare_chunks,
+    skipped_chunks: skippedChunkIds.length,
+    skipped_chunk_ids: skippedChunkIds,
+    failures,
+    remaining_pending: finalStats.missing_cloudflare_chunks,
+    reindexed_documents: reindexedDocuments,
+    finalized_documents: finalizedDocuments,
+    final_stats: finalStats,
+  };
+
+  log("\nBackfill Summary");
+  log("----------------");
+  log(`Total chunks            : ${summary.total_chunks}`);
+  log(`Already completed       : ${summary.already_completed}`);
+  log(`Newly completed         : ${summary.newly_completed}`);
+  log(`Completed embeddings    : ${summary.completed_embeddings}`);
+  log(`Skipped chunks          : ${summary.skipped_chunks}`);
+  log(`Failures                : ${summary.failures.length}`);
+  log(`Remaining pending CF    : ${summary.remaining_pending}`);
+
+  return summary;
 }
 
 export async function runReembedCloudflare(
@@ -337,134 +675,27 @@ export async function runReembedCloudflare(
       );
     }
 
-    let totalUpdated = 0;
-    let batchNumber = 0;
+    const summary = await executeCloudflareBackfill({
+      storage,
+      embedFn,
+      initialStats: stats,
+      batchSize: args.batchSize,
+      maxRetries: args.maxRetries,
+      retryDelayMs: args.retryDelayMs,
+      model,
+      expectedDims,
+      logger: log,
+    });
 
-    // 1. Backfill existing chunks missing 1,024-d Cloudflare vectors
-    while (true) {
-      const pending = await storage.fetchChunksNeedingCloudflareEmbedding(args.batchSize);
-      if (pending.length === 0) {
-        break;
-      }
-
-      batchNumber += 1;
-      const vectors = await embedFn(pending.map((c) => c.text));
-      if (vectors.length !== pending.length) {
-        throw new Error(
-          `Batch ${batchNumber} vector count mismatch: expected ${pending.length}, got ${vectors.length}.`
-        );
-      }
-
-      const payload = pending.map((chunk, idx) => {
-        const vec = vectors[idx];
-        if (!Array.isArray(vec) || vec.length !== expectedDims) {
-          throw new Error(
-            `Chunk ${chunk.chunk_id} received ${vec?.length ?? 0} dimensions instead of ${expectedDims}.`
-          );
-        }
-        return {
-          chunk_id: chunk.chunk_id,
-          embedding_cf: vec,
-          embedding_cf_model: model,
-        };
-      });
-
-      const updated = await storage.saveCloudflareChunkEmbeddings(payload);
-      totalUpdated += updated;
-      log(
-        `Batch ${batchNumber}: updated ${updated}/${pending.length} chunk(s) (total updated: ${totalUpdated}).`
+    if (summary.failures.length > 0) {
+      throw new Error(
+        `Cloudflare backfill finished with ${summary.failures.length} failed chunk(s): ${summary.failures
+          .map((f) => `${f.chunk_id} (${f.error})`)
+          .join("; ")}`
       );
     }
 
-    // 2. Re-index any documents with zero stored chunks using their stored PDF files
-    if (
-      storage.fetchDocumentsWithMissingChunks &&
-      storage.getPdfBinary &&
-      storage.insertChunks &&
-      storage.updateDocument
-    ) {
-      const processedDocIds = new Set<string>();
-      while (true) {
-        const docsMissingChunks = await storage.fetchDocumentsWithMissingChunks(args.batchSize);
-        const nextDocs = docsMissingChunks.filter((d) => !processedDocIds.has(d.id));
-        if (nextDocs.length === 0) break;
-
-        for (const doc of nextDocs) {
-          processedDocIds.add(doc.id);
-          const binary = await storage.getPdfBinary(doc);
-          if (!binary) {
-            log(`Skipping document ${doc.id} (${doc.filename}): no stored PDF binary available.`);
-            continue;
-          }
-
-          const { totalPages, chunks: rawChunks } = await extractPdfPagesAndChunks(
-            binary.buffer,
-            doc.id,
-            doc.filename
-          );
-
-          const storedChunks: StoredChunk[] = [];
-          for (let offset = 0; offset < rawChunks.length; offset += args.batchSize) {
-            const slice = rawChunks.slice(offset, offset + args.batchSize);
-            const vecs = await embedFn(slice.map((c) => c.text));
-            if (vecs.length !== slice.length) {
-              throw new Error(
-                `Document ${doc.id} vector count mismatch: expected ${slice.length}, got ${vecs.length}.`
-              );
-            }
-            for (let i = 0; i < slice.length; i++) {
-              const vec = vecs[i];
-              if (!Array.isArray(vec) || vec.length !== expectedDims) {
-                throw new Error(
-                  `Chunk ${slice[i].chunk_id} received ${vec?.length ?? 0} dimensions instead of ${expectedDims}.`
-                );
-              }
-              storedChunks.push({
-                ...slice[i],
-                embedding: null,
-                embedding_model: null,
-                embedding_cf: vec,
-                embedding_cf_model: model,
-              });
-            }
-          }
-
-          await storage.insertChunks(storedChunks, {
-            provider: "cloudflare",
-            embeddingModel: model,
-          });
-          // Never mark document indexed until all Cloudflare embeddings are stored.
-          await storage.updateDocument(doc.id, {
-            status: "Indexed Successfully",
-            progress: 100,
-            pages: totalPages,
-            chunks_count: storedChunks.length,
-            error_message: null,
-          });
-          totalUpdated += storedChunks.length;
-          log(
-            `Re-indexed document ${doc.id} (${doc.filename}) from stored PDF: ${storedChunks.length} chunks (${expectedDims}d).`
-          );
-        }
-      }
-    }
-
-    // 3. Ensure document status is marked indexed only once every chunk has valid Cloudflare vectors
-    if (storage.markCompleteDocumentsIndexed) {
-      const finalizedDocs = await storage.markCompleteDocumentsIndexed();
-      if (finalizedDocs > 0) {
-        log(`Marked ${finalizedDocs} document(s) 'Indexed Successfully' after verifying complete Cloudflare vectors.`);
-      }
-    }
-
-    const finalStats = await storage.getChunkMigrationStats();
-    log("\nBackfill Complete");
-    log("-----------------");
-    log(`Total chunks            : ${finalStats.total_chunks}`);
-    log(`Legacy vector chunks    : ${finalStats.legacy_chunks}`);
-    log(`Chunks with CF vec      : ${finalStats.cloudflare_chunks}`);
-    log(`Remaining pending CF    : ${finalStats.missing_cloudflare_chunks}`);
-    return finalStats;
+    return summary.final_stats;
   } finally {
     await storage.close();
   }
