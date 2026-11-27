@@ -66,6 +66,8 @@ export interface DashboardStats {
   recent_conversations: ConversationTurn[];
 }
 
+export type CompareBranchStatus = "completed" | "truncated" | "error";
+
 export interface CompareResponse {
   request_id?: string;
   question: string;
@@ -73,15 +75,27 @@ export interface CompareResponse {
   top_k?: number;
   ai_provider?: "cloudflare";
   model?: string;
+  partial?: boolean;
+  status?: "completed" | "partial";
   without_rag: {
+    status?: CompareBranchStatus;
     answer: string;
     ai_provider?: "cloudflare";
     model?: string;
+    finish_reason?: string | null;
+    truncated?: boolean;
+    error?: string;
+    timed_out?: boolean;
   };
   with_rag: {
+    status?: CompareBranchStatus;
     answer: string;
     ai_provider?: "cloudflare";
     model?: string;
+    finish_reason?: string | null;
+    truncated?: boolean;
+    error?: string;
+    timed_out?: boolean;
     sources: RetrievedChunk[];
     prompt_preview: string;
   };
