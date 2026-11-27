@@ -20,6 +20,8 @@ import {
 } from "../server/aiClient.js";
 import {
   CF_COMPARE_ATTEMPT_TIMEOUT_MS,
+  CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION,
+  CF_COMPARE_RAG_SYSTEM_INSTRUCTION,
   CF_COMPARE_TOTAL_BUDGET_MS,
   CF_GENERATE_TIMEOUT_MS,
   CF_GENERATE_TOTAL_BUDGET_MS,
@@ -2326,6 +2328,8 @@ async function runRagComparisonOptimizationAndTimeoutTests() {
 
   assert.ok(CF_COMPARE_ATTEMPT_TIMEOUT_MS < CF_GENERATE_TIMEOUT_MS);
   assert.ok(CF_COMPARE_TOTAL_BUDGET_MS - CF_COMPARE_ATTEMPT_TIMEOUT_MS >= 20_000);
+  assert.ok(CF_COMPARE_TOTAL_BUDGET_MS <= VERCEL_REQUEST_DEADLINE_MS);
+  assert.ok(VERCEL_REQUEST_DEADLINE_MS < 60_000);
   assert.ok(COMPARE_RAG_MAX_CONTEXT_CHARS < RAG_MAX_CONTEXT_CHARS);
   assert.ok(COMPARE_RAG_MAX_OUTPUT_TOKENS < RAG_MAX_OUTPUT_TOKENS);
 
@@ -2615,8 +2619,210 @@ async function runRagComparisonOptimizationAndTimeoutTests() {
       });
       assert.equal(badInputResp.status, 400);
 
+      // 20d. Concise comparison-specific prompts & finish_reason truncation verification
+      clearCloudflareCachesForTest();
+      const recordedSystemPrompts: { isRag: boolean; system: string }[] = [];
+      setCloudflareFetchForTest(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/ai/v1/embeddings")) {
+          return new Response(
+            JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as {
+          messages: Array<{ role: string; content: string }>;
+        };
+        const isRag = body.messages[1].content.includes("<retrieved_context>");
+        recordedSystemPrompts.push({ isRag, system: body.messages[0].content });
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: isRag ? "stop" : "length",
+                message: {
+                  content: isRag
+                    ? "Hardware MFA and 365-day audit logs are mandated [Policy_A.pdf, p. 1]."
+                    : "In general security architectures, multi-factor authentication helps protect",
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      });
+
+      const truncResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "Summarize MFA requirements and explain benefits." }),
+      });
+      assert.equal(truncResp.status, 200);
+      const truncBody = (await truncResp.json()) as {
+        partial: boolean;
+        status: string;
+        without_rag: { status: string; finish_reason: string | null; truncated: boolean };
+        with_rag: { status: string; finish_reason: string | null; truncated: boolean };
+      };
+      assert.equal(recordedSystemPrompts.length, 2);
+      assert.equal(
+        recordedSystemPrompts.find((p) => !p.isRag)?.system,
+        CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION
+      );
+      assert.equal(
+        recordedSystemPrompts.find((p) => p.isRag)?.system,
+        CF_COMPARE_RAG_SYSTEM_INSTRUCTION
+      );
+      assert.equal(truncBody.partial, false);
+      assert.equal(truncBody.status, "partial");
+      assert.equal(truncBody.without_rag.status, "truncated");
+      assert.equal(truncBody.without_rag.finish_reason, "length");
+      assert.equal(truncBody.without_rag.truncated, true);
+      assert.equal(truncBody.with_rag.status, "completed");
+      assert.equal(truncBody.with_rag.finish_reason, "stop");
+      assert.equal(truncBody.with_rag.truncated, false);
+
+      // 20e. Safe partial-branch recovery when one branch times out persistently & auth errors are never masked
+      clearCloudflareCachesForTest();
+      setCloudflareFetchForTest(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/ai/v1/embeddings")) {
+          return new Response(
+            JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as {
+          messages: Array<{ role: string; content: string }>;
+        };
+        const isRag = body.messages[1].content.includes("<retrieved_context>");
+        if (!isRag) {
+          const timeoutErr = new Error("Cloudflare Workers AI request timed out after 26000ms.");
+          timeoutErr.name = "AbortError";
+          throw timeoutErr;
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  content: "Grounded answer succeeded independently [Policy_A.pdf, p. 1].",
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      });
+
+      const partialRagOkResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "Partial recovery when baseline times out?" }),
+      });
+      assert.equal(partialRagOkResp.status, 200);
+      const partialRagOkBody = (await partialRagOkResp.json()) as {
+        partial: boolean;
+        status: string;
+        without_rag: { status: string; answer: string; error?: string; timed_out?: boolean };
+        with_rag: { status: string; answer: string; sources: Array<{ filename: string }> };
+      };
+      assert.equal(partialRagOkBody.partial, true);
+      assert.equal(partialRagOkBody.status, "partial");
+      assert.equal(partialRagOkBody.without_rag.status, "error");
+      assert.equal(partialRagOkBody.without_rag.answer, "");
+      assert.equal(partialRagOkBody.without_rag.timed_out, true);
+      assert.match(partialRagOkBody.without_rag.error ?? "", /timed out before completing/i);
+      assert.equal(partialRagOkBody.with_rag.status, "completed");
+      assert.ok(partialRagOkBody.with_rag.answer.includes("[Policy_A.pdf, p. 1]"));
+      assert.ok(partialRagOkBody.with_rag.sources.length > 0);
+
+      // Now test reverse partial failure: Without-RAG succeeds (and caches), With-RAG generation times out after retrieval succeeds
+      clearCloudflareCachesForTest();
+      setCloudflareFetchForTest(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/ai/v1/embeddings")) {
+          return new Response(
+            JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as {
+          messages: Array<{ role: string; content: string }>;
+        };
+        const isRag = body.messages[1].content.includes("<retrieved_context>");
+        if (isRag) {
+          const timeoutErr = new Error("Cloudflare Workers AI request timed out after 26000ms.");
+          timeoutErr.name = "AbortError";
+          throw timeoutErr;
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: "stop",
+                message: { content: "Baseline general answer succeeded." },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      });
+
+      const partialNoRagOkResp = await realFetch(`${baseUrl}/api/rag/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "Partial recovery when RAG generation times out?" }),
+      });
+      assert.equal(partialNoRagOkResp.status, 200);
+      const partialNoRagOkBody = (await partialNoRagOkResp.json()) as {
+        partial: boolean;
+        status: string;
+        without_rag: { status: string; answer: string };
+        with_rag: {
+          status: string;
+          answer: string;
+          error?: string;
+          timed_out?: boolean;
+          sources: Array<{ filename: string }>;
+        };
+      };
+      assert.equal(partialNoRagOkBody.partial, true);
+      assert.equal(partialNoRagOkBody.status, "partial");
+      assert.equal(partialNoRagOkBody.without_rag.status, "completed");
+      assert.equal(partialNoRagOkBody.without_rag.answer, "Baseline general answer succeeded.");
+      assert.equal(partialNoRagOkBody.with_rag.status, "error");
+      assert.equal(partialNoRagOkBody.with_rag.answer, "");
+      assert.equal(partialNoRagOkBody.with_rag.timed_out, true);
+      assert.match(partialNoRagOkBody.with_rag.error ?? "", /timed out before completing/i);
+      assert.ok(partialNoRagOkBody.with_rag.sources.length > 0);
+
+      // Auth failure on RAG branch must still return 403 even if Without-RAG hit TTL cache
+      setCloudflareFetchForTest(async () => {
+        return new Response(
+          JSON.stringify({ errors: [{ code: 10000, message: "Authentication error" }] }),
+          { status: 401 }
+        );
+      });
+      const cachedVsAuthResp = await realFetch(`${baseUrl}/api/rag/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "Partial recovery when RAG generation times out?" }),
+      });
+      assert.equal(cachedVsAuthResp.status, 403);
+
+      // Verify frontend clears stale comparison results and handles partial/truncated states
+      const ragCompareSource = fs.readFileSync(
+        path.join(process.cwd(), "src", "pages", "RAGComparison.tsx"),
+        "utf8"
+      );
+      assert.ok(ragCompareSource.includes("setResult(null);"));
+      assert.ok(ragCompareSource.includes("withoutRagStatus"));
+      assert.ok(ragCompareSource.includes("withRagStatus"));
+
       console.log(
-        "PASS: RAG Comparison parallel execution, context/token optimization, timeout recovery, and error handling tests passed (3/3)."
+        "PASS: RAG Comparison optimization, finish_reason verification, partial-branch recovery, and error handling tests passed (5/5)."
       );
     } finally {
       await new Promise<void>((resolve, reject) =>
