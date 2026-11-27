@@ -61,6 +61,9 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
 
   const activeModel =
     result?.model || health?.chat_model || "@cf/meta/llama-4-scout-17b-16e-instruct";
+  const withoutRagModel = result?.without_rag?.model || activeModel;
+  const withRagModel = result?.with_rag?.model || activeModel;
+  const effectiveTopK = result?.top_k ?? Math.min(preferences.topK, 3);
   const providerLabel = "Cloudflare Workers AI";
 
   return (
@@ -160,7 +163,7 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
 
             <div className="flex-1 p-4 rounded-xl bg-[var(--dm-bg-secondary)]/80 border border-[var(--dm-border)] flex flex-col gap-3">
               <span className="font-mono text-[11px] text-[var(--dm-text-muted)]">
-                Standard {providerLabel} Output ({activeModel})
+                Standard {providerLabel} Output ({withoutRagModel})
               </span>
               {loading ? (
                 <div className="space-y-2.5">
@@ -201,7 +204,7 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
             <ul className="space-y-2 text-xs text-[var(--dm-text-secondary)]">
               <li className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-700 dark:text-emerald-400 shrink-0" aria-hidden="true" />
-                <span>Retrieves top {preferences.topK} semantic chunks via cosine similarity</span>
+                <span>Retrieves top {effectiveTopK} semantic chunks via cosine similarity</span>
               </li>
               <li className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-700 dark:text-emerald-400 shrink-0" aria-hidden="true" />
@@ -215,7 +218,7 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
 
             <div className="flex-1 p-4 rounded-xl bg-[var(--dm-bg-secondary)]/80 border border-cyan-400/25 flex flex-col gap-4">
               <span className="font-mono text-[11px] text-cyan-700 dark:text-cyan-300">
-                Retrieval-Grounded Output ({activeModel})
+                Retrieval-Grounded Output ({withRagModel})
               </span>
               {loading ? (
                 <div className="space-y-2.5">
@@ -236,7 +239,7 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
                         Source Evidence ({result.with_rag.sources.length})
                       </span>
                       <span className="font-mono text-[11px] text-[var(--dm-text-muted)]">
-                        Top-{preferences.topK} similarity
+                        Top-{effectiveTopK} similarity
                       </span>
                     </div>
 
