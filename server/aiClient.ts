@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import {
+  CF_COMPARE_ATTEMPT_TIMEOUT_MS,
   CF_COMPARE_TOTAL_BUDGET_MS,
   checkCloudflareConnectivity,
   classifyCloudflareError,
@@ -14,7 +15,7 @@ import {
   getCloudflareExpectedEmbeddingDimensions,
   isCloudflareConfigured,
 } from "./cloudflareClient.js";
-import { buildOptimizedRagPrompt, redactSecrets, RetrievedChunkRef } from "./ragPrompt.js";
+import { buildOptimizedRagPrompt, RagPromptOptions, redactSecrets, RetrievedChunkRef } from "./ragPrompt.js";
 
 export type AiProvider = "cloudflare";
 
@@ -29,6 +30,11 @@ export interface AiGenerationOptions {
   requestId?: string;
   endpoint?: string;
   retrievalDurationMs?: number;
+  maxTokens?: number;
+  compactMaxTokens?: number;
+  promptOptions?: RagPromptOptions;
+  compactPromptOptions?: RagPromptOptions;
+  signal?: AbortSignal;
 }
 
 export interface AiRagResult {
@@ -105,6 +111,10 @@ export function getCompareTotalBudgetMs(): number {
   return CF_COMPARE_TOTAL_BUDGET_MS;
 }
 
+export function getCompareAttemptTimeoutMs(): number {
+  return CF_COMPARE_ATTEMPT_TIMEOUT_MS;
+}
+
 function assertCloudflareVectorsValid(vectors: number[][], model: string): number[][] {
   const expectedDims = getExpectedEmbeddingDimensions();
   for (const vec of vectors) {
@@ -119,7 +129,7 @@ function assertCloudflareVectorsValid(vectors: number[][], model: string): numbe
 
 export async function generateEmbeddings(
   texts: string[],
-  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number; maxAttempts?: number } = {}
+  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number; maxAttempts?: number; signal?: AbortSignal } = {}
 ): Promise<number[][]> {
   const model = getActiveEmbeddingModel();
   const vectors = await generateCloudflareEmbeddings(texts, options);
@@ -128,7 +138,7 @@ export async function generateEmbeddings(
 
 export async function embedQuery(
   question: string,
-  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number } = {}
+  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number; signal?: AbortSignal } = {}
 ): Promise<number[]> {
   const model = getActiveEmbeddingModel();
   const vector = await embedCloudflareQuery(question, options);
@@ -143,7 +153,7 @@ export async function generateRagAnswer(
 ): Promise<AiRagResult> {
   const requestId = options.requestId ?? crypto.randomUUID();
   const model = getCloudflareChatModel();
-  const promptMetrics = buildOptimizedRagPrompt(question, chunks);
+  const promptMetrics = buildOptimizedRagPrompt(question, chunks, options.promptOptions);
   const providerStart = Date.now();
 
   try {

@@ -19,6 +19,17 @@ export const RAG_COMPACT_MAX_CHUNK_CHARS = 850;
 export const RAG_COMPACT_MAX_CONTEXT_CHARS = 1_800;
 export const RAG_COMPACT_MAX_OUTPUT_TOKENS = 384;
 
+export const COMPARE_MAX_TOP_K = 3;
+export const COMPARE_RAG_MAX_CHUNKS = 3;
+export const COMPARE_RAG_MAX_CHUNK_CHARS = 700;
+export const COMPARE_RAG_MAX_CONTEXT_CHARS = 2_000;
+export const COMPARE_RAG_MAX_OUTPUT_TOKENS = 320;
+export const COMPARE_NO_RAG_MAX_OUTPUT_TOKENS = 320;
+export const COMPARE_COMPACT_MAX_CHUNKS = 2;
+export const COMPARE_COMPACT_MAX_CHUNK_CHARS = 600;
+export const COMPARE_COMPACT_MAX_CONTEXT_CHARS = 1_300;
+export const COMPARE_COMPACT_MAX_OUTPUT_TOKENS = 240;
+
 export interface RagPromptOptions {
   maxChunks?: number;
   maxChunkChars?: number;

@@ -10,6 +10,7 @@ import {
   getActiveAiProvider,
   getActiveChatModel,
   getActiveEmbeddingModel,
+  getCompareAttemptTimeoutMs,
   getCompareTotalBudgetMs,
   isAiConfigured,
   VERCEL_REQUEST_DEADLINE_MS,
@@ -19,7 +20,19 @@ import {
   CHUNK_SIZE_TOKENS,
   ragEngine,
 } from "./ragEngine.js";
-import { DEFAULT_RAG_TOP_K } from "./ragPrompt.js";
+import {
+  COMPARE_COMPACT_MAX_CHUNK_CHARS,
+  COMPARE_COMPACT_MAX_CHUNKS,
+  COMPARE_COMPACT_MAX_CONTEXT_CHARS,
+  COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
+  COMPARE_MAX_TOP_K,
+  COMPARE_NO_RAG_MAX_OUTPUT_TOKENS,
+  COMPARE_RAG_MAX_CHUNK_CHARS,
+  COMPARE_RAG_MAX_CHUNKS,
+  COMPARE_RAG_MAX_CONTEXT_CHARS,
+  COMPARE_RAG_MAX_OUTPUT_TOKENS,
+  DEFAULT_RAG_TOP_K,
+} from "./ragPrompt.js";
 import {
   runWithBlobOidcContext,
   sanitizeDatabaseErrorMessage,
@@ -54,6 +67,19 @@ function extractOidcHeaderToken(req: Request): string | undefined {
     return raw[0].trim() || undefined;
   }
   return undefined;
+}
+
+function parseDocumentIds(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const cleaned = Array.from(
+    new Set(
+      raw
+        .filter((id): id is string => typeof id === "string")
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  );
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 export function createApiApp(): Express {
@@ -284,9 +310,7 @@ export function createApiApp(): Express {
       return;
     }
 
-    const documentIds = Array.isArray(req.body?.document_ids)
-      ? req.body.document_ids.filter((id: unknown): id is string => typeof id === "string")
-      : undefined;
+    const documentIds = parseDocumentIds(req.body?.document_ids);
     const topK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
@@ -297,10 +321,14 @@ export function createApiApp(): Express {
 
     try {
       const retrievalStart = Date.now();
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, {
-        deadlineMs,
-        requestId,
-      });
+      const [chunks, embeddingDims, totalChunks] = await Promise.all([
+        ragEngine.retrieveChunks(question, topK, documentIds, {
+          deadlineMs,
+          requestId,
+        }),
+        ragEngine.getEmbeddingDimensions(),
+        ragEngine.getTotalChunksCount(),
+      ]);
       const retrievalDurationMs = Date.now() - retrievalStart;
       const ragResult = await generateRagAnswer(question, chunks, {
         deadlineMs,
@@ -310,9 +338,15 @@ export function createApiApp(): Express {
       });
       await ragEngine.recordQuestion(question, ragResult.answer, chunks);
       res.json({
+        request_id: requestId,
         question,
+        document_ids: documentIds ?? [],
+        top_k: topK,
         ai_provider: ragResult.provider,
         model: ragResult.model,
+        embedding_model: getActiveEmbeddingModel(),
+        embedding_dimensions: embeddingDims,
+        total_chunks_indexed: totalChunks,
         answer: ragResult.answer,
         sources: chunks,
         prompt_preview: ragResult.promptPreview,
@@ -331,43 +365,88 @@ export function createApiApp(): Express {
       return;
     }
 
-    const documentIds = Array.isArray(req.body?.document_ids)
-      ? req.body.document_ids.filter((id: unknown): id is string => typeof id === "string")
-      : undefined;
-    const topK =
+    const documentIds = parseDocumentIds(req.body?.document_ids);
+    const requestedTopK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
         : DEFAULT_RAG_TOP_K;
+    const effectiveTopK = Math.min(requestedTopK, COMPARE_MAX_TOP_K);
 
     const requestId = crypto.randomUUID();
     const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
+    const compareAbort = new AbortController();
 
     try {
       const totalBudgetMs = getCompareTotalBudgetMs();
+      const attemptTimeoutMs = getCompareAttemptTimeoutMs();
       const retrievalStart = Date.now();
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, {
+
+      // Start the ungrounded Without-RAG call immediately alongside retrieval so it does not
+      // sit idle behind query embedding + pgvector lookup inside Vercel's 60s limit.
+      const withoutRagPromise = generateWithoutRagAnswerWithMeta(question, {
+        totalBudgetMs,
+        attemptTimeoutMs,
         deadlineMs,
         requestId,
+        endpoint: req.path,
+        maxTokens: COMPARE_NO_RAG_MAX_OUTPUT_TOKENS,
+        compactMaxTokens: COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
+        signal: compareAbort.signal,
+      }).catch((err: unknown) => {
+        if (!compareAbort.signal.aborted) {
+          compareAbort.abort(err);
+        }
+        throw err;
       });
-      const retrievalDurationMs = Date.now() - retrievalStart;
-      const [withoutRagResult, withRagResult] = await Promise.all([
-        generateWithoutRagAnswerWithMeta(question, {
-          totalBudgetMs,
+
+      const withRagChainPromise = ragEngine
+        .retrieveChunks(question, effectiveTopK, documentIds, {
           deadlineMs,
           requestId,
-          endpoint: req.path,
-          retrievalDurationMs,
-        }),
-        generateRagAnswer(question, chunks, {
-          totalBudgetMs,
-          deadlineMs,
-          requestId,
-          endpoint: req.path,
-          retrievalDurationMs,
-        }),
+          signal: compareAbort.signal,
+        })
+        .then(async (chunks) => {
+          const retrievalDurationMs = Date.now() - retrievalStart;
+          const withRagResult = await generateRagAnswer(question, chunks, {
+            totalBudgetMs,
+            attemptTimeoutMs,
+            deadlineMs,
+            requestId,
+            endpoint: req.path,
+            retrievalDurationMs,
+            maxTokens: COMPARE_RAG_MAX_OUTPUT_TOKENS,
+            compactMaxTokens: COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
+            promptOptions: {
+              maxChunks: COMPARE_RAG_MAX_CHUNKS,
+              maxChunkChars: COMPARE_RAG_MAX_CHUNK_CHARS,
+              maxContextChars: COMPARE_RAG_MAX_CONTEXT_CHARS,
+            },
+            compactPromptOptions: {
+              maxChunks: COMPARE_COMPACT_MAX_CHUNKS,
+              maxChunkChars: COMPARE_COMPACT_MAX_CHUNK_CHARS,
+              maxContextChars: COMPARE_COMPACT_MAX_CONTEXT_CHARS,
+            },
+            signal: compareAbort.signal,
+          });
+          return { chunks, withRagResult };
+        })
+        .catch((err: unknown) => {
+          if (!compareAbort.signal.aborted) {
+            compareAbort.abort(err);
+          }
+          throw err;
+        });
+
+      const [withoutRagResult, { chunks, withRagResult }] = await Promise.all([
+        withoutRagPromise,
+        withRagChainPromise,
       ]);
+
       res.json({
+        request_id: requestId,
         question,
+        document_ids: documentIds ?? [],
+        top_k: effectiveTopK,
         ai_provider: withRagResult.provider,
         model: withRagResult.model,
         without_rag: {
@@ -384,6 +463,9 @@ export function createApiApp(): Express {
         },
       });
     } catch (err: unknown) {
+      if (!compareAbort.signal.aborted) {
+        compareAbort.abort(err);
+      }
       const formatted = formatRouteError(err);
       res.status(formatted.status).json({ detail: formatted.message });
     }
@@ -400,9 +482,7 @@ export function createApiApp(): Express {
       return;
     }
 
-    const documentIds = Array.isArray(req.body?.document_ids)
-      ? req.body.document_ids.filter((id: unknown): id is string => typeof id === "string")
-      : undefined;
+    const documentIds = parseDocumentIds(req.body?.document_ids);
     const topK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
@@ -429,7 +509,9 @@ export function createApiApp(): Express {
         retrievalDurationMs,
       });
       res.json({
+        request_id: requestId,
         question,
+        document_ids: documentIds ?? [],
         chunks,
         prompt_preview: ragResult.promptPreview,
         answer: ragResult.answer,

@@ -299,12 +299,17 @@ class RagEngine {
     question: string,
     topK = DEFAULT_RAG_TOP_K,
     documentIds?: string[],
-    options: { deadlineMs?: number; requestId?: string } = {}
+    options: { deadlineMs?: number; requestId?: string; signal?: AbortSignal } = {}
   ): Promise<RetrievedChunkRef[]> {
     const embeddingModel = getActiveEmbeddingModel();
     const embedBudgetOptions =
-      options.deadlineMs !== undefined
-        ? { deadlineMs: Math.min(options.deadlineMs, Date.now() + 15_000) }
+      options.deadlineMs !== undefined || options.signal !== undefined
+        ? {
+            ...(options.deadlineMs !== undefined
+              ? { deadlineMs: Math.min(options.deadlineMs, Date.now() + 15_000) }
+              : {}),
+            ...(options.signal !== undefined ? { signal: options.signal } : {}),
+          }
         : undefined;
 
     const [, queryEmbedding] = await Promise.all([

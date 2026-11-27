@@ -5,6 +5,7 @@ import {
   RAG_COMPACT_MAX_CONTEXT_CHARS,
   RAG_COMPACT_MAX_OUTPUT_TOKENS,
   RAG_MAX_OUTPUT_TOKENS,
+  RagPromptOptions,
   redactSecrets,
   RetrievedChunkRef,
 } from "./ragPrompt.js";
@@ -26,6 +27,7 @@ const DEPRECATED_CLOUDFLARE_CHAT_MODELS = new Set([
 
 export const CF_GENERATE_TIMEOUT_MS = 32_000;
 export const CF_GENERATE_TOTAL_BUDGET_MS = 46_000;
+export const CF_COMPARE_ATTEMPT_TIMEOUT_MS = 22_000;
 export const CF_COMPARE_TOTAL_BUDGET_MS = 46_000;
 export const CF_EMBED_TIMEOUT_MS = 12_000;
 export const CF_EMBED_TOTAL_BUDGET_MS = 24_000;
@@ -598,8 +600,29 @@ function computeExponentialBackoffWithJitter(baseMs: number, attempt: number): n
   return Math.min(MAX_BACKOFF_DELAY_MS, Math.round(exponential * jitterFactor));
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(
+      signal.reason instanceof Error
+        ? signal.reason
+        : new Error("Cloudflare Workers AI request was cancelled.")
+    );
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(
+        signal?.reason instanceof Error
+          ? signal.reason
+          : new Error("Cloudflare Workers AI request was cancelled.")
+      );
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function callCloudflareJson<T>(
@@ -611,6 +634,7 @@ async function callCloudflareJson<T>(
     totalBudgetMs?: number;
     deadlineMs?: number;
     retryOnTimeout?: boolean;
+    signal?: AbortSignal;
   } = {}
 ): Promise<T> {
   const { accountId, apiToken } = getCloudflareCredentials();
@@ -628,6 +652,12 @@ async function callCloudflareJson<T>(
   let lastErr: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (options.signal?.aborted) {
+      throw options.signal.reason instanceof Error
+        ? options.signal.reason
+        : new Error("Cloudflare Workers AI request was cancelled.");
+    }
+
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 50) break;
 
@@ -640,6 +670,17 @@ async function callCloudflareJson<T>(
       timeoutErr.name = "AbortError";
       controller.abort(timeoutErr);
     }, perAttemptMs);
+
+    const onExternalAbort = () => {
+      const reason =
+        options.signal?.reason instanceof Error
+          ? options.signal.reason
+          : new Error("Cloudflare Workers AI request was cancelled.");
+      controller.abort(reason);
+    };
+    if (options.signal) {
+      options.signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
 
     try {
       const releaseSlot = await acquireCfSlot(controller.signal);
@@ -678,6 +719,10 @@ async function callCloudflareJson<T>(
         releaseSlot();
       }
     } catch (err: unknown) {
+      if (options.signal?.aborted) {
+        throw options.signal.reason instanceof Error ? options.signal.reason : err;
+      }
+
       lastErr = err;
       const classified = classifyCloudflareError(err);
       const shouldRetry =
@@ -729,9 +774,10 @@ async function callCloudflareJson<T>(
         throw err;
       }
 
-      await sleep(delayMs);
+      await sleep(delayMs, options.signal);
     } finally {
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onExternalAbort);
     }
   }
 
@@ -939,6 +985,7 @@ export async function generateCloudflareEmbeddings(
     totalBudgetMs?: number;
     maxAttempts?: number;
     retryOnTimeout?: boolean;
+    signal?: AbortSignal;
   } = {}
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
@@ -972,6 +1019,7 @@ export async function generateCloudflareEmbeddings(
         totalBudgetMs: options.totalBudgetMs ?? CF_EMBED_TOTAL_BUDGET_MS,
         deadlineMs: options.deadlineMs,
         retryOnTimeout: options.retryOnTimeout ?? true,
+        signal: options.signal,
       }
     );
 
@@ -996,7 +1044,12 @@ export async function generateCloudflareEmbeddings(
 
 export async function embedCloudflareQuery(
   question: string,
-  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number } = {}
+  options: {
+    deadlineMs?: number;
+    attemptTimeoutMs?: number;
+    totalBudgetMs?: number;
+    signal?: AbortSignal;
+  } = {}
 ): Promise<number[]> {
   const normalized = question.trim();
   const model = getCloudflareEmbeddingModel();
@@ -1005,15 +1058,18 @@ export async function embedCloudflareQuery(
   const cached = readTtlCache(queryEmbeddingCache, cacheKey);
   if (cached) return cached;
 
-  const inFlight = inFlightQueryEmbeddings.get(cacheKey);
-  if (inFlight) return inFlight;
+  if (!options.signal) {
+    const inFlight = inFlightQueryEmbeddings.get(cacheKey);
+    if (inFlight) return inFlight;
+  }
 
-  const promise = (async () => {
+  const run = async () => {
     const [vector] = await generateCloudflareEmbeddings([normalized], {
       deadlineMs: options.deadlineMs,
       attemptTimeoutMs: options.attemptTimeoutMs ?? CF_QUERY_EMBED_TIMEOUT_MS,
       totalBudgetMs: options.totalBudgetMs ?? CF_QUERY_EMBED_TOTAL_BUDGET_MS,
       retryOnTimeout: true,
+      signal: options.signal,
     });
     writeTtlCache(
       queryEmbeddingCache,
@@ -1023,7 +1079,13 @@ export async function embedCloudflareQuery(
       QUERY_EMBED_CACHE_TTL_MS
     );
     return vector;
-  })().finally(() => {
+  };
+
+  if (options.signal) {
+    return run();
+  }
+
+  const promise = run().finally(() => {
     inFlightQueryEmbeddings.delete(cacheKey);
   });
 
@@ -1076,9 +1138,14 @@ export async function generateCloudflareRagAnswer(
     attemptTimeoutMs?: number;
     maxAttempts?: number;
     deadlineMs?: number;
+    maxTokens?: number;
+    compactMaxTokens?: number;
+    promptOptions?: RagPromptOptions;
+    compactPromptOptions?: RagPromptOptions;
+    signal?: AbortSignal;
   } = {}
 ): Promise<{ answer: string; promptPreview: string }> {
-  const primaryPrompt = buildOptimizedRagPrompt(question, chunks);
+  const primaryPrompt = buildOptimizedRagPrompt(question, chunks, options.promptOptions);
   if (chunks.length === 0) {
     return {
       answer:
@@ -1088,11 +1155,20 @@ export async function generateCloudflareRagAnswer(
   }
 
   const model = getCloudflareChatModel();
-  const dedupeKey = `${model}::${question.trim()}::${chunks.map((c) => c.chunk_id).join(",")}`;
-  const inFlight = inFlightRagAnswers.get(dedupeKey);
-  if (inFlight) return inFlight;
+  const primaryMaxTokens = options.maxTokens ?? CLOUDFLARE_CHAT_MAX_TOKENS;
+  const compactMaxTokens = Math.min(
+    primaryMaxTokens,
+    options.compactMaxTokens ?? RAG_COMPACT_MAX_OUTPUT_TOKENS
+  );
+  const promptSig = `${options.promptOptions?.maxChunks ?? "d"}:${options.promptOptions?.maxContextChars ?? "d"}:${primaryMaxTokens}`;
+  const dedupeKey = `${model}::${promptSig}::${question.trim()}::${chunks.map((c) => c.chunk_id).join(",")}`;
 
-  const promise = (async () => {
+  if (!options.signal) {
+    const inFlight = inFlightRagAnswers.get(dedupeKey);
+    if (inFlight) return inFlight;
+  }
+
+  const run = async () => {
     const startedAt = Date.now();
     const totalBudgetMs = options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS;
     const effectiveDeadline =
@@ -1111,6 +1187,7 @@ export async function generateCloudflareRagAnswer(
         totalBudgetMs: number;
         deadlineMs: number;
         retryOnTimeout?: boolean;
+        signal?: AbortSignal;
       }
     ) =>
       callCloudflareJson<OpenAiChatCompletionResponse>(
@@ -1129,12 +1206,13 @@ export async function generateCloudflareRagAnswer(
       );
 
     try {
-      const res = await sendChat(primaryPrompt.promptPreview, CLOUDFLARE_CHAT_MAX_TOKENS, {
+      const res = await sendChat(primaryPrompt.promptPreview, primaryMaxTokens, {
         maxAttempts,
         attemptTimeoutMs,
         totalBudgetMs,
         deadlineMs: effectiveDeadline,
         retryOnTimeout: false,
+        signal: options.signal,
       });
 
       return {
@@ -1142,33 +1220,43 @@ export async function generateCloudflareRagAnswer(
         promptPreview: primaryPrompt.promptPreview,
       };
     } catch (err: unknown) {
+      if (options.signal?.aborted) {
+        throw options.signal.reason instanceof Error ? options.signal.reason : err;
+      }
+
       const classified = classifyCloudflareError(err);
       const remainingMs = effectiveDeadline - Date.now();
+      const minRetryRoomMs = totalBudgetMs < 5_000 ? 150 : CF_COMPACT_RETRY_MIN_ROOM_MS;
       const canRetryCompact =
         classified.kind === "timeout" &&
         maxAttempts > 1 &&
-        remainingMs >= CF_COMPACT_RETRY_MIN_ROOM_MS;
+        remainingMs >= minRetryRoomMs;
 
       if (!canRetryCompact) {
         throw err;
       }
 
-      const compactPrompt = buildOptimizedRagPrompt(question, chunks, {
-        maxChunks: RAG_COMPACT_MAX_CHUNKS,
-        maxChunkChars: RAG_COMPACT_MAX_CHUNK_CHARS,
-        maxContextChars: RAG_COMPACT_MAX_CONTEXT_CHARS,
-      });
-
-      console.warn(
-        `[cloudflare] Primary RAG completion timed out; retrying once with compact context (${compactPrompt.contextChars} context chars, ${compactPrompt.deduplicatedChunksCount} chunks, ${remainingMs}ms remaining).`
+      const compactPrompt = buildOptimizedRagPrompt(
+        question,
+        chunks,
+        options.compactPromptOptions ?? {
+          maxChunks: RAG_COMPACT_MAX_CHUNKS,
+          maxChunkChars: RAG_COMPACT_MAX_CHUNK_CHARS,
+          maxContextChars: RAG_COMPACT_MAX_CONTEXT_CHARS,
+        }
       );
 
-      const compactRes = await sendChat(compactPrompt.promptPreview, RAG_COMPACT_MAX_OUTPUT_TOKENS, {
+      console.warn(
+        `[cloudflare] Primary RAG completion timed out; retrying once with compact context (${compactPrompt.contextChars} context chars, ${compactPrompt.deduplicatedChunksCount} chunks, max_tokens=${compactMaxTokens}, ${remainingMs}ms remaining).`
+      );
+
+      const compactRes = await sendChat(compactPrompt.promptPreview, compactMaxTokens, {
         maxAttempts: 1,
         attemptTimeoutMs: Math.min(attemptTimeoutMs, Math.max(1_000, remainingMs - 100)),
         totalBudgetMs: remainingMs,
         deadlineMs: effectiveDeadline,
         retryOnTimeout: false,
+        signal: options.signal,
       });
 
       return {
@@ -1176,7 +1264,13 @@ export async function generateCloudflareRagAnswer(
         promptPreview: compactPrompt.promptPreview,
       };
     }
-  })().finally(() => {
+  };
+
+  if (options.signal) {
+    return run();
+  }
+
+  const promise = run().finally(() => {
     inFlightRagAnswers.delete(dedupeKey);
   });
 
@@ -1191,44 +1285,115 @@ export async function generateCloudflareWithoutRagAnswer(
     attemptTimeoutMs?: number;
     maxAttempts?: number;
     deadlineMs?: number;
+    maxTokens?: number;
+    compactMaxTokens?: number;
+    signal?: AbortSignal;
   } = {}
 ): Promise<string> {
   const model = getCloudflareChatModel();
   const normalized = question.trim();
-  const cacheKey = `${model}::${normalized}`;
+  const primaryMaxTokens = options.maxTokens ?? CLOUDFLARE_CHAT_MAX_TOKENS;
+  const compactMaxTokens = Math.min(
+    primaryMaxTokens,
+    options.compactMaxTokens ?? RAG_COMPACT_MAX_OUTPUT_TOKENS
+  );
+  const cacheKey = `${model}::${primaryMaxTokens}::${normalized}`;
 
   const cached = readTtlCache(noRagAnswerCache, cacheKey);
   if (cached) return cached;
 
-  const inFlight = inFlightNoRagAnswers.get(cacheKey);
-  if (inFlight) return inFlight;
+  if (!options.signal) {
+    const inFlight = inFlightNoRagAnswers.get(cacheKey);
+    if (inFlight) return inFlight;
+  }
 
-  const promise = (async () => {
-    const res = await callCloudflareJson<OpenAiChatCompletionResponse>(
-      "/chat/completions",
-      {
-        model,
-        messages: [
-          { role: "system", content: CF_NO_RAG_SYSTEM_INSTRUCTION },
-          { role: "user", content: normalized },
-        ],
-        max_tokens: CLOUDFLARE_CHAT_MAX_TOKENS,
-        temperature: CLOUDFLARE_CHAT_TEMPERATURE,
-        stream: false,
-      },
-      {
-        maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
-        attemptTimeoutMs: options.attemptTimeoutMs ?? CF_GENERATE_TIMEOUT_MS,
-        totalBudgetMs: options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS,
-        deadlineMs: options.deadlineMs,
-        retryOnTimeout: true,
+  const run = async () => {
+    const startedAt = Date.now();
+    const totalBudgetMs = options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS;
+    const effectiveDeadline =
+      options.deadlineMs !== undefined
+        ? Math.min(startedAt + totalBudgetMs, options.deadlineMs)
+        : startedAt + totalBudgetMs;
+    const attemptTimeoutMs = options.attemptTimeoutMs ?? CF_GENERATE_TIMEOUT_MS;
+    const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+
+    const sendNoRag = (
+      maxTokens: number,
+      callOpts: {
+        maxAttempts: number;
+        attemptTimeoutMs: number;
+        totalBudgetMs: number;
+        deadlineMs: number;
+        retryOnTimeout?: boolean;
+        signal?: AbortSignal;
       }
-    );
+    ) =>
+      callCloudflareJson<OpenAiChatCompletionResponse>(
+        "/chat/completions",
+        {
+          model,
+          messages: [
+            { role: "system", content: CF_NO_RAG_SYSTEM_INSTRUCTION },
+            { role: "user", content: normalized },
+          ],
+          max_tokens: maxTokens,
+          temperature: CLOUDFLARE_CHAT_TEMPERATURE,
+          stream: false,
+        },
+        callOpts
+      );
+
+    let res: OpenAiChatCompletionResponse;
+    try {
+      res = await sendNoRag(primaryMaxTokens, {
+        maxAttempts,
+        attemptTimeoutMs,
+        totalBudgetMs,
+        deadlineMs: effectiveDeadline,
+        retryOnTimeout: false,
+        signal: options.signal,
+      });
+    } catch (err: unknown) {
+      if (options.signal?.aborted) {
+        throw options.signal.reason instanceof Error ? options.signal.reason : err;
+      }
+
+      const classified = classifyCloudflareError(err);
+      const remainingMs = effectiveDeadline - Date.now();
+      const minRetryRoomMs = totalBudgetMs < 5_000 ? 150 : CF_COMPACT_RETRY_MIN_ROOM_MS;
+      const canRetryShorter =
+        classified.kind === "timeout" &&
+        maxAttempts > 1 &&
+        remainingMs >= minRetryRoomMs;
+
+      if (!canRetryShorter) {
+        throw err;
+      }
+
+      console.warn(
+        `[cloudflare] Primary non-RAG completion timed out; retrying once with reduced max_tokens=${compactMaxTokens} (${remainingMs}ms remaining).`
+      );
+
+      res = await sendNoRag(compactMaxTokens, {
+        maxAttempts: 1,
+        attemptTimeoutMs: Math.min(attemptTimeoutMs, Math.max(1_000, remainingMs - 100)),
+        totalBudgetMs: remainingMs,
+        deadlineMs: effectiveDeadline,
+        retryOnTimeout: false,
+        signal: options.signal,
+      });
+    }
 
     const answer = extractChatContent(res);
     writeTtlCache(noRagAnswerCache, cacheKey, answer, NO_RAG_CACHE_MAX, NO_RAG_CACHE_TTL_MS);
     return answer;
-  })().finally(() => {
+  };
+
+  if (options.signal) {
+    return run();
+  }
+
+  const promise = run().finally(() => {
     inFlightNoRagAnswers.delete(cacheKey);
   });
 
