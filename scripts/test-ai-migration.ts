@@ -19,6 +19,7 @@ import {
   VERCEL_REQUEST_DEADLINE_MS,
 } from "../server/aiClient.js";
 import {
+  CF_COMPARE_ATTEMPT_TIMEOUT_MS,
   CF_COMPARE_TOTAL_BUDGET_MS,
   CF_GENERATE_TIMEOUT_MS,
   CF_GENERATE_TOTAL_BUDGET_MS,
@@ -37,6 +38,12 @@ import {
 import { chunkPageText } from "../server/ragEngine.js";
 import {
   buildOptimizedRagPrompt,
+  COMPARE_COMPACT_MAX_CONTEXT_CHARS,
+  COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
+  COMPARE_MAX_TOP_K,
+  COMPARE_NO_RAG_MAX_OUTPUT_TOKENS,
+  COMPARE_RAG_MAX_CONTEXT_CHARS,
+  COMPARE_RAG_MAX_OUTPUT_TOKENS,
   RAG_COMPACT_MAX_CONTEXT_CHARS,
   RAG_COMPACT_MAX_OUTPUT_TOKENS,
   RAG_MAX_CONTEXT_CHARS,
@@ -2311,12 +2318,330 @@ async function runDocumentIsolationAndInspectorTraceTests() {
   }
 }
 
+async function runRagComparisonOptimizationAndTimeoutTests() {
+  const prevEnv = {
+    CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
+  };
+
+  assert.ok(CF_COMPARE_ATTEMPT_TIMEOUT_MS < CF_GENERATE_TIMEOUT_MS);
+  assert.ok(CF_COMPARE_TOTAL_BUDGET_MS - CF_COMPARE_ATTEMPT_TIMEOUT_MS >= 20_000);
+  assert.ok(COMPARE_RAG_MAX_CONTEXT_CHARS < RAG_MAX_CONTEXT_CHARS);
+  assert.ok(COMPARE_RAG_MAX_OUTPUT_TOKENS < RAG_MAX_OUTPUT_TOKENS);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "documind-compare-test-"));
+  try {
+    process.env.CLOUDFLARE_ACCOUNT_ID = "cf-compare-account";
+    process.env.CLOUDFLARE_API_TOKEN = "cf-compare-secret-token";
+    clearCloudflareCachesForTest();
+
+    const store = new LocalDevJsonStorage(path.join(tmpDir, "store.json"));
+    const docAId = "doc-compare-a";
+    const docBId = "doc-compare-b";
+    await store.insertDocument({
+      id: docAId,
+      filename: "Policy_A.pdf",
+      size_bytes: 4096,
+      pages: 3,
+      chunks_count: 3,
+      status: "Indexed Successfully",
+      progress: 100,
+      error_message: null,
+      sha256: "sha-compare-a",
+      uploaded_at: new Date().toISOString(),
+    });
+    await store.insertDocument({
+      id: docBId,
+      filename: "Policy_B.pdf",
+      size_bytes: 4096,
+      pages: 2,
+      chunks_count: 2,
+      status: "Indexed Successfully",
+      progress: 100,
+      error_message: null,
+      sha256: "sha-compare-b",
+      uploaded_at: new Date().toISOString(),
+    });
+
+    const queryVec = unitVec(1024, 0);
+    const bulkyChunks: StoredChunk[] = Array.from({ length: 5 }, (_, idx) => ({
+      chunk_id: `${idx < 3 ? docAId : docBId}_p${idx + 1}_c0`,
+      document_id: idx < 3 ? docAId : docBId,
+      filename: idx < 3 ? "Policy_A.pdf" : "Policy_B.pdf",
+      page_number: idx + 1,
+      text: `Passage ${idx + 1}: Zero-trust verification requires hardware MFA and 365-day immutable audit retention. `.repeat(18),
+      token_count: 240,
+      embedding: null,
+      embedding_model: null,
+      embedding_cf: unitVec(1024, idx === 0 ? 0 : 1).map((v, i) => (i === 0 ? 0.9 - idx * 0.05 : v)),
+      embedding_cf_model: "@cf/baai/bge-m3",
+    }));
+    await store.insertChunks(bulkyChunks);
+    setStorageAdapterForTest(store);
+
+    const expressApp = createApiApp();
+    const server = http.createServer(expressApp);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    try {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        throw new Error("Failed to bind ephemeral compare test port");
+      }
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const realFetch = globalThis.fetch;
+
+      // 20a. Parallel Without-RAG start, top_k=8 capping to COMPARE_MAX_TOP_K, reduced context & model parity
+      let embedFinishedAt = 0;
+      let noRagStartedAt = 0;
+      const recordedChatCalls: Array<{ model: string; maxTokens: number; isRag: boolean; userContent: string }> = [];
+
+      setCloudflareFetchForTest(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/ai/v1/embeddings")) {
+          await new Promise((r) => setTimeout(r, 60));
+          embedFinishedAt = Date.now();
+          return new Response(
+            JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as {
+          model: string;
+          max_tokens: number;
+          messages: Array<{ role: string; content: string }>;
+        };
+        const userContent = body.messages[1].content;
+        const isRag = userContent.includes("<retrieved_context>");
+        if (!isRag && noRagStartedAt === 0) {
+          noRagStartedAt = Date.now();
+        }
+        recordedChatCalls.push({
+          model: body.model,
+          maxTokens: body.max_tokens,
+          isRag,
+          userContent,
+        });
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: isRag
+                    ? "Hardware MFA and 365-day audit retention are required [Policy_A.pdf, p. 1]."
+                    : "General security knowledge response.",
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      });
+
+      const okResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: "What MFA and audit retention policies apply?",
+          top_k: 8,
+        }),
+      });
+      assert.equal(okResp.status, 200);
+      const okBody = (await okResp.json()) as {
+        top_k: number;
+        ai_provider: string;
+        model: string;
+        without_rag: { answer: string; ai_provider: string; model: string };
+        with_rag: {
+          answer: string;
+          ai_provider: string;
+          model: string;
+          sources: Array<{ chunk_id: string }>;
+          prompt_preview: string;
+        };
+      };
+
+      assert.ok(noRagStartedAt > 0 && embedFinishedAt > 0);
+      assert.ok(
+        noRagStartedAt <= embedFinishedAt,
+        `Without-RAG call should start concurrently with retrieval (noRagStartedAt=${noRagStartedAt}, embedFinishedAt=${embedFinishedAt})`
+      );
+      assert.equal(okBody.top_k, COMPARE_MAX_TOP_K);
+      assert.equal(okBody.with_rag.sources.length, COMPARE_MAX_TOP_K);
+      assert.equal(okBody.model, "@cf/meta/llama-4-scout-17b-16e-instruct");
+      assert.equal(okBody.without_rag.model, "@cf/meta/llama-4-scout-17b-16e-instruct");
+      assert.equal(okBody.with_rag.model, "@cf/meta/llama-4-scout-17b-16e-instruct");
+
+      const ctxMatch = okBody.with_rag.prompt_preview.match(
+        /<retrieved_context>\n([\s\S]*)\n<\/retrieved_context>/
+      );
+      assert.ok(ctxMatch && ctxMatch[1].length <= COMPARE_RAG_MAX_CONTEXT_CHARS);
+      assert.equal(recordedChatCalls.length, 2);
+      for (const call of recordedChatCalls) {
+        assert.equal(call.model, "@cf/meta/llama-4-scout-17b-16e-instruct");
+        assert.equal(
+          call.maxTokens,
+          call.isRag ? COMPARE_RAG_MAX_OUTPUT_TOKENS : COMPARE_NO_RAG_MAX_OUTPUT_TOKENS
+        );
+      }
+
+      // 20b. /api/rag/compare alias & RAG timeout compact-context recovery + Without-RAG reduced-token recovery
+      clearCloudflareCachesForTest();
+      let ragAttempts = 0;
+      let noRagAttempts = 0;
+      const recoveryPayloads: Array<{ isRag: boolean; maxTokens: number; prompt: string }> = [];
+
+      setCloudflareFetchForTest(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/ai/v1/embeddings")) {
+          return new Response(
+            JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as {
+          model: string;
+          max_tokens: number;
+          messages: Array<{ role: string; content: string }>;
+        };
+        const prompt = body.messages[1].content;
+        const isRag = prompt.includes("<retrieved_context>");
+        recoveryPayloads.push({ isRag, maxTokens: body.max_tokens, prompt });
+
+        if (isRag) {
+          ragAttempts += 1;
+          if (ragAttempts === 1) {
+            const timeoutErr = new Error("Cloudflare Workers AI request timed out after 22000ms.");
+            timeoutErr.name = "AbortError";
+            throw timeoutErr;
+          }
+        } else {
+          noRagAttempts += 1;
+          if (noRagAttempts === 1) {
+            const timeoutErr = new Error("Cloudflare Workers AI request timed out after 22000ms.");
+            timeoutErr.name = "AbortError";
+            throw timeoutErr;
+          }
+        }
+
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: isRag
+                    ? "Recovered RAG comparison answer [Policy_A.pdf, p. 1]."
+                    : "Recovered concise non-RAG answer.",
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      });
+
+      const recoverResp = await realFetch(`${baseUrl}/api/rag/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: "How does MFA verification work?",
+          top_k: 5,
+        }),
+      });
+      assert.equal(recoverResp.status, 200);
+      const recoverBody = (await recoverResp.json()) as {
+        without_rag: { answer: string; model: string };
+        with_rag: { answer: string; model: string; prompt_preview: string };
+      };
+      assert.equal(ragAttempts, 2);
+      assert.equal(noRagAttempts, 2);
+      assert.equal(recoverBody.without_rag.answer, "Recovered concise non-RAG answer.");
+      assert.ok(recoverBody.with_rag.answer.includes("[Policy_A.pdf, p. 1]"));
+
+      const ragSecond = recoveryPayloads.filter((p) => p.isRag)[1];
+      const noRagSecond = recoveryPayloads.filter((p) => !p.isRag)[1];
+      assert.equal(ragSecond.maxTokens, COMPARE_COMPACT_MAX_OUTPUT_TOKENS);
+      assert.equal(noRagSecond.maxTokens, COMPARE_COMPACT_MAX_OUTPUT_TOKENS);
+      assert.equal(recoverBody.with_rag.prompt_preview, ragSecond.prompt);
+      const compactMatch = recoverBody.with_rag.prompt_preview.match(
+        /<retrieved_context>\n([\s\S]*)\n<\/retrieved_context>/
+      );
+      assert.ok(compactMatch && compactMatch[1].length <= COMPARE_COMPACT_MAX_CONTEXT_CHARS);
+
+      // 20c. Persistent comparison timeout returns 504 JSON cleanly, auth error returns 403, invalid input returns 400
+      clearCloudflareCachesForTest();
+      setCloudflareFetchForTest(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/ai/v1/embeddings")) {
+          return new Response(
+            JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const err = new Error("Cloudflare Workers AI request timed out after 22000ms.");
+        err.name = "AbortError";
+        throw err;
+      });
+
+      const timeoutResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "Persistent timeout question?" }),
+      });
+      assert.equal(timeoutResp.status, 504);
+      const timeoutBody = (await timeoutResp.json()) as { detail: string };
+      assert.match(timeoutBody.detail, /timed out before completing/i);
+
+      clearCloudflareCachesForTest();
+      setCloudflareFetchForTest(async () => {
+        return new Response(
+          JSON.stringify({ errors: [{ code: 10000, message: "Authentication error" }] }),
+          { status: 401 }
+        );
+      });
+      const authErrResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "Auth error question?" }),
+      });
+      assert.equal(authErrResp.status, 403);
+      const authErrBody = (await authErrResp.json()) as { detail: string };
+      assert.ok(!authErrBody.detail.includes("cf-compare-secret-token"));
+
+      const badInputResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: "   " }),
+      });
+      assert.equal(badInputResp.status, 400);
+
+      console.log(
+        "PASS: RAG Comparison parallel execution, context/token optimization, timeout recovery, and error handling tests passed (3/3)."
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
+  } finally {
+    setStorageAdapterForTest(null);
+    setCloudflareFetchForTest(null);
+    clearCloudflareCachesForTest();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const [key, val] of Object.entries(prevEnv)) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  }
+}
+
 async function main() {
   await runCloudflareOnlyCoreTests();
   await runStorageRetrievalAndSafetyTests();
   await runEndToEndMigrationAndBackfillTests();
   await runHttpApiAndHealthTests();
   await runDocumentIsolationAndInspectorTraceTests();
+  await runRagComparisonOptimizationAndTimeoutTests();
   await runOptionalLiveCloudflareSmokeTest();
 }
 
