@@ -5,7 +5,6 @@ import multer from "multer";
 import {
   checkAiProviderConnectivity,
   formatAiError,
-  generateDocumentComparison,
   generateRagAnswer,
   generateWithoutRagAnswerWithMeta,
   getActiveAiProvider,
@@ -18,7 +17,6 @@ import {
 import {
   CHUNK_OVERLAP_TOKENS,
   CHUNK_SIZE_TOKENS,
-  DocumentCompareValidationError,
   ragEngine,
 } from "./ragEngine.js";
 import { DEFAULT_RAG_TOP_K } from "./ragPrompt.js";
@@ -27,34 +25,6 @@ import {
   sanitizeDatabaseErrorMessage,
   StorageConfigError,
 } from "./storage.js";
-
-export const JSON_BODY_MAX_BYTES = 64 * 1024;
-const MAX_QUESTION_CHARS = 4_000;
-const MAX_DOCUMENT_ID_CHARS = 128;
-const MAX_COMPARE_DOCUMENT_IDS = 4;
-const MAX_SCOPE_DOCUMENT_IDS = 25;
-
-const DISALLOWED_INLINE_BODY_KEYS = new Set([
-  "file",
-  "files",
-  "pdf",
-  "pdfs",
-  "base64",
-  "pdf_base64",
-  "data",
-  "data_url",
-  "content",
-  "contents",
-  "document_text",
-  "extracted_text",
-  "raw_text",
-  "text",
-  "documents",
-  "doc_a_text",
-  "doc_b_text",
-  "document_a_text",
-  "document_b_text",
-]);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -65,7 +35,7 @@ const upload = multer({
 });
 
 function formatRouteError(err: unknown): { status: number; message: string } {
-  if (err instanceof StorageConfigError || err instanceof DocumentCompareValidationError) {
+  if (err instanceof StorageConfigError) {
     return { status: err.statusCode, message: sanitizeDatabaseErrorMessage(err.message) };
   }
   const formatted = formatAiError(err);
@@ -73,124 +43,6 @@ function formatRouteError(err: unknown): { status: number; message: string } {
     status: formatted.status,
     message: sanitizeDatabaseErrorMessage(formatted.message),
   };
-}
-
-function isPayloadTooLargeError(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const record = err as { type?: unknown; status?: unknown; statusCode?: unknown; name?: unknown };
-  return (
-    record.type === "entity.too.large" ||
-    record.status === 413 ||
-    record.statusCode === 413 ||
-    record.name === "PayloadTooLargeError"
-  );
-}
-
-function validateNoInlineDocumentPayload(body: unknown): { status: number; detail: string } | null {
-  if (body === undefined || body === null) {
-    return { status: 400, detail: "Request body must be a JSON object." };
-  }
-  if (typeof body !== "object" || Array.isArray(body)) {
-    return { status: 400, detail: "Request body must be a JSON object." };
-  }
-
-  const record = body as Record<string, unknown>;
-  for (const [key, val] of Object.entries(record)) {
-    if (val === undefined || val === null) continue;
-    const lowerKey = key.trim().toLowerCase();
-    if (!DISALLOWED_INLINE_BODY_KEYS.has(lowerKey)) continue;
-
-    const isEmpty =
-      (typeof val === "string" && val.trim().length === 0) ||
-      (Array.isArray(val) && val.length === 0);
-    if (isEmpty) continue;
-
-    const approxSize = typeof val === "string" ? val.length : JSON.stringify(val).length;
-    return {
-      status: approxSize > 8_192 ? 413 : 400,
-      detail:
-        "Do not send PDF files, base64 data, or extracted document text in comparison requests. Upload PDFs first and pass uploaded document_ids instead.",
-    };
-  }
-
-  const qRaw =
-    typeof record.question === "string"
-      ? record.question
-      : typeof record.focus_question === "string"
-      ? record.focus_question
-      : "";
-  if (qRaw) {
-    const trimmed = qRaw.trim();
-    if (/^data:application\/pdf|;base64,|%PDF-/i.test(trimmed)) {
-      return {
-        status: trimmed.length > 8_192 ? 413 : 400,
-        detail:
-          "Embedded PDF or base64 data is not allowed in the question field. Pass uploaded document_ids instead.",
-      };
-    }
-    if (trimmed.length > MAX_QUESTION_CHARS) {
-      return {
-        status: trimmed.length > 16_384 ? 413 : 400,
-        detail: `Question or comparison focus exceeds the ${MAX_QUESTION_CHARS}-character limit (received ${trimmed.length} characters).`,
-      };
-    }
-  }
-
-  return null;
-}
-
-function validateDocumentIdsList(
-  rawIds: unknown,
-  options: { min: number; max: number; requireDistinct: boolean }
-): { ok: true; ids: string[] } | { ok: false; status: number; detail: string } {
-  if (!Array.isArray(rawIds)) {
-    return {
-      ok: false,
-      status: 400,
-      detail: "document_ids must be an array of uploaded document IDs.",
-    };
-  }
-  if (rawIds.length > options.max) {
-    return {
-      ok: false,
-      status: 400,
-      detail: `At most ${options.max} document_ids may be included in a single request.`,
-    };
-  }
-
-  const cleaned: string[] = [];
-  for (const item of rawIds) {
-    if (typeof item !== "string") {
-      return { ok: false, status: 400, detail: "Every entry in document_ids must be a string ID." };
-    }
-    const id = item.trim();
-    if (!id || id.length > MAX_DOCUMENT_ID_CHARS || /\s/.test(id)) {
-      return {
-        ok: false,
-        status: 400,
-        detail: "Each document ID must be a valid non-empty identifier without whitespace.",
-      };
-    }
-    cleaned.push(id);
-  }
-
-  const uniqueIds = Array.from(new Set(cleaned));
-  if (options.requireDistinct && uniqueIds.length < options.min) {
-    return {
-      ok: false,
-      status: 400,
-      detail: `Please select at least ${options.min} distinct uploaded documents to compare.`,
-    };
-  }
-  if (uniqueIds.length < options.min) {
-    return {
-      ok: false,
-      status: 400,
-      detail: `At least ${options.min} uploaded document_ids are required.`,
-    };
-  }
-
-  return { ok: true, ids: uniqueIds };
 }
 
 function extractOidcHeaderToken(req: Request): string | undefined {
@@ -204,27 +56,26 @@ function extractOidcHeaderToken(req: Request): string | undefined {
   return undefined;
 }
 
+function parseDocumentIds(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const cleaned = Array.from(
+    new Set(
+      raw
+        .filter((id): id is string => typeof id === "string")
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  );
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
 export function createApiApp(): Express {
   const app = express();
   app.set("trust proxy", 1);
   app.use((req, _res, next) => {
     runWithBlobOidcContext(extractOidcHeaderToken(req), next);
   });
-  app.use("/api", (req, res, next) => {
-    if (req.path === "/documents/upload") {
-      next();
-      return;
-    }
-    const contentLength = Number(req.headers["content-length"]);
-    if (Number.isFinite(contentLength) && contentLength > JSON_BODY_MAX_BYTES) {
-      res.status(413).json({
-        detail: `Request payload is too large (${Math.ceil(contentLength / 1024)} KB exceeds the ${Math.floor(JSON_BODY_MAX_BYTES / 1024)} KB JSON limit). Send uploaded document_ids instead of PDF files, base64 data, or extracted document text.`,
-      });
-      return;
-    }
-    next();
-  });
-  app.use(express.json({ limit: JSON_BODY_MAX_BYTES }));
+  app.use(express.json({ limit: "4mb" }));
 
   // Health & diagnostics endpoint: clearly separates application/database health
   // from external Cloudflare Workers AI provider connectivity.
@@ -440,31 +291,13 @@ export function createApiApp(): Express {
 
   // RAG Document Chat Ask
   app.post("/api/chat/ask", async (req, res) => {
-    const inlineError = validateNoInlineDocumentPayload(req.body);
-    if (inlineError) {
-      res.status(inlineError.status).json({ detail: inlineError.detail });
-      return;
-    }
-
     const question = typeof req.body?.question === "string" ? req.body.question.trim() : "";
-    if (!question || question.length > MAX_QUESTION_CHARS) {
+    if (!question || question.length > 4000) {
       res.status(400).json({ detail: "Please provide a non-empty question under 4000 characters." });
       return;
     }
 
-    let documentIds: string[] | undefined;
-    if (req.body?.document_ids !== undefined) {
-      const checked = validateDocumentIdsList(req.body.document_ids, {
-        min: 0,
-        max: MAX_SCOPE_DOCUMENT_IDS,
-        requireDistinct: false,
-      });
-      if (!checked.ok) {
-        res.status(checked.status).json({ detail: checked.detail });
-        return;
-      }
-      documentIds = checked.ids.length > 0 ? checked.ids : undefined;
-    }
+    const documentIds = parseDocumentIds(req.body?.document_ids);
     const topK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
@@ -475,10 +308,14 @@ export function createApiApp(): Express {
 
     try {
       const retrievalStart = Date.now();
-      const chunks = await ragEngine.retrieveChunks(question, topK, documentIds, {
-        deadlineMs,
-        requestId,
-      });
+      const [chunks, embeddingDims, totalChunks] = await Promise.all([
+        ragEngine.retrieveChunks(question, topK, documentIds, {
+          deadlineMs,
+          requestId,
+        }),
+        ragEngine.getEmbeddingDimensions(),
+        ragEngine.getTotalChunksCount(),
+      ]);
       const retrievalDurationMs = Date.now() - retrievalStart;
       const ragResult = await generateRagAnswer(question, chunks, {
         deadlineMs,
@@ -488,9 +325,15 @@ export function createApiApp(): Express {
       });
       await ragEngine.recordQuestion(question, ragResult.answer, chunks);
       res.json({
+        request_id: requestId,
         question,
+        document_ids: documentIds ?? [],
+        top_k: topK,
         ai_provider: ragResult.provider,
         model: ragResult.model,
+        embedding_model: getActiveEmbeddingModel(),
+        embedding_dimensions: embeddingDims,
+        total_chunks_indexed: totalChunks,
         answer: ragResult.answer,
         sources: chunks,
         prompt_preview: ragResult.promptPreview,
@@ -503,31 +346,13 @@ export function createApiApp(): Express {
 
   // Side-by-side RAG vs Without RAG comparison
   const handleCompare = async (req: Request, res: Response) => {
-    const inlineError = validateNoInlineDocumentPayload(req.body);
-    if (inlineError) {
-      res.status(inlineError.status).json({ detail: inlineError.detail });
-      return;
-    }
-
     const question = typeof req.body?.question === "string" ? req.body.question.trim() : "";
-    if (!question || question.length > MAX_QUESTION_CHARS) {
+    if (!question || question.length > 4000) {
       res.status(400).json({ detail: "Please provide a non-empty question under 4000 characters." });
       return;
     }
 
-    let documentIds: string[] | undefined;
-    if (req.body?.document_ids !== undefined) {
-      const checked = validateDocumentIdsList(req.body.document_ids, {
-        min: 0,
-        max: MAX_SCOPE_DOCUMENT_IDS,
-        requireDistinct: false,
-      });
-      if (!checked.ok) {
-        res.status(checked.status).json({ detail: checked.detail });
-        return;
-      }
-      documentIds = checked.ids.length > 0 ? checked.ids : undefined;
-    }
+    const documentIds = parseDocumentIds(req.body?.document_ids);
     const topK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
@@ -561,7 +386,9 @@ export function createApiApp(): Express {
         }),
       ]);
       res.json({
+        request_id: requestId,
         question,
+        document_ids: documentIds ?? [],
         ai_provider: withRagResult.provider,
         model: withRagResult.model,
         without_rag: {
@@ -586,137 +413,15 @@ export function createApiApp(): Express {
   app.post("/api/chat/compare", handleCompare);
   app.post("/api/rag/compare", handleCompare);
 
-  // Compare uploaded documents strictly by document IDs (chunks fetched & optimized server-side)
-  app.post("/api/documents/compare", async (req, res) => {
-    const inlineError = validateNoInlineDocumentPayload(req.body);
-    if (inlineError) {
-      res.status(inlineError.status).json({ detail: inlineError.detail });
-      return;
-    }
-
-    const rawDocIds =
-      req.body?.document_ids !== undefined
-        ? req.body.document_ids
-        : req.body?.document_a_id || req.body?.document_b_id
-        ? [req.body.document_a_id, req.body.document_b_id]
-        : undefined;
-
-    const checkedIds = validateDocumentIdsList(rawDocIds, {
-      min: 2,
-      max: MAX_COMPARE_DOCUMENT_IDS,
-      requireDistinct: true,
-    });
-    if (!checkedIds.ok) {
-      res.status(checkedIds.status).json({ detail: checkedIds.detail });
-      return;
-    }
-
-    const rawQuestion =
-      typeof req.body?.question === "string"
-        ? req.body.question
-        : typeof req.body?.focus_question === "string"
-        ? req.body.focus_question
-        : "";
-    const question = rawQuestion.trim();
-    if (question.length > MAX_QUESTION_CHARS) {
-      res.status(400).json({
-        detail: `Comparison focus question must be under ${MAX_QUESTION_CHARS} characters.`,
-      });
-      return;
-    }
-
-    const topKPerDoc =
-      typeof req.body?.top_k === "number" && Number.isFinite(req.body.top_k)
-        ? Math.max(1, Math.min(6, Math.floor(req.body.top_k)))
-        : 4;
-
-    const requestId = crypto.randomUUID();
-    const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
-
-    try {
-      const retrievalStart = Date.now();
-      const { documents, chunksByDocument, allSources } =
-        await ragEngine.retrieveComparisonChunksForDocuments(checkedIds.ids, {
-          question: question || undefined,
-          topKPerDoc,
-          deadlineMs,
-          requestId,
-        });
-      const retrievalDurationMs = Date.now() - retrievalStart;
-
-      const compareResult = await generateDocumentComparison(
-        {
-          question: question || undefined,
-          documents: documents.map((d) => ({
-            id: d.id,
-            filename: d.filename,
-            pages: d.pages,
-          })),
-          chunksByDocument,
-        },
-        {
-          totalBudgetMs: getCompareTotalBudgetMs(),
-          deadlineMs,
-          requestId,
-          endpoint: "/api/documents/compare",
-          retrievalDurationMs,
-        }
-      );
-
-      res.json({
-        ai_provider: compareResult.provider,
-        model: compareResult.model,
-        question: question || "Side-by-side document comparison",
-        documents: documents.map((d) => ({
-          id: d.id,
-          filename: d.filename,
-          pages: d.pages,
-          chunks_count: d.chunks_count,
-          retrieved_chunks: chunksByDocument.get(d.id)?.length ?? 0,
-        })),
-        comparison: compareResult.comparison,
-        sources: allSources,
-        prompt_preview: compareResult.promptPreview,
-        context_stats: {
-          original_chunks: compareResult.contextStats.originalChunks,
-          optimized_chunks: compareResult.contextStats.optimizedChunks,
-          context_chars: compareResult.contextStats.contextChars,
-          max_context_chars: compareResult.contextStats.maxContextChars,
-        },
-      });
-    } catch (err: unknown) {
-      const formatted = formatRouteError(err);
-      res.status(formatted.status).json({ detail: formatted.message });
-    }
-  });
-
   // Inspect RAG retrieval pipeline
   app.post("/api/retrieval/inspect", async (req, res) => {
-    const inlineError = validateNoInlineDocumentPayload(req.body);
-    if (inlineError) {
-      res.status(inlineError.status).json({ detail: inlineError.detail });
-      return;
-    }
-
     const question = typeof req.body?.question === "string" ? req.body.question.trim() : "";
-    if (!question || question.length > MAX_QUESTION_CHARS) {
+    if (!question || question.length > 4000) {
       res.status(400).json({ detail: "Please provide a non-empty question under 4000 characters." });
       return;
     }
 
-    let documentIds: string[] | undefined;
-    if (req.body?.document_ids !== undefined) {
-      const checked = validateDocumentIdsList(req.body.document_ids, {
-        min: 0,
-        max: MAX_SCOPE_DOCUMENT_IDS,
-        requireDistinct: false,
-      });
-      if (!checked.ok) {
-        res.status(checked.status).json({ detail: checked.detail });
-        return;
-      }
-      documentIds = checked.ids.length > 0 ? checked.ids : undefined;
-    }
+    const documentIds = parseDocumentIds(req.body?.document_ids);
     const topK =
       typeof req.body?.top_k === "number" && req.body.top_k >= 1 && req.body.top_k <= 15
         ? req.body.top_k
@@ -743,7 +448,9 @@ export function createApiApp(): Express {
         retrievalDurationMs,
       });
       res.json({
+        request_id: requestId,
         question,
+        document_ids: documentIds ?? [],
         chunks,
         prompt_preview: ragResult.promptPreview,
         answer: ragResult.answer,
@@ -795,14 +502,8 @@ export function createApiApp(): Express {
     res.status(404).json({ detail: "API endpoint not found." });
   });
 
-  // Scoped JSON error handler for oversized payloads, malformed JSON, or unexpected Express errors on /api routes
+  // Scoped JSON error handler for malformed JSON bodies or unexpected Express errors on /api routes
   app.use("/api", (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (isPayloadTooLargeError(err)) {
-      res.status(413).json({
-        detail: `Request payload is too large (exceeds the ${Math.floor(JSON_BODY_MAX_BYTES / 1024)} KB JSON limit). Send uploaded document_ids instead of PDF files, base64 data, or extracted document text.`,
-      });
-      return;
-    }
     if (
       err instanceof SyntaxError &&
       "status" in err &&

@@ -42,9 +42,16 @@ export interface RetrievedChunk {
 
 export interface ConversationTurn {
   id: string;
+  request_id?: string;
   question: string;
   answer: string;
   sources: RetrievedChunk[];
+  document_ids?: string[];
+  top_k?: number;
+  model?: string;
+  embedding_model?: string;
+  embedding_dimensions?: number | null;
+  total_chunks_indexed?: number;
   created_at: string;
   prompt_preview?: string;
 }
@@ -60,7 +67,9 @@ export interface DashboardStats {
 }
 
 export interface CompareResponse {
+  request_id?: string;
   question: string;
+  document_ids?: string[];
   ai_provider?: "cloudflare";
   model?: string;
   without_rag: {
@@ -77,32 +86,10 @@ export interface CompareResponse {
   };
 }
 
-export interface ComparedDocumentSummary {
-  id: string;
-  filename: string;
-  pages: number;
-  chunks_count: number;
-  retrieved_chunks: number;
-}
-
-export interface DocumentCompareResponse {
-  ai_provider: "cloudflare";
-  model: string;
-  question: string;
-  documents: ComparedDocumentSummary[];
-  comparison: string;
-  sources: RetrievedChunk[];
-  prompt_preview: string;
-  context_stats: {
-    original_chunks: number;
-    optimized_chunks: number;
-    context_chars: number;
-    max_context_chars: number;
-  };
-}
-
 export interface RetrievalInspectResponse {
+  request_id?: string;
   question: string;
+  document_ids?: string[];
   chunks: RetrievedChunk[];
   prompt_preview: string;
   answer: string;

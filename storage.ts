@@ -106,7 +106,6 @@ export interface StorageAdapter {
     documentIds?: string[],
     options?: { provider?: AiProvider; embeddingModel?: string }
   ): Promise<RetrievedChunkRef[]>;
-  getDocumentChunks(documentId: string, limit?: number): Promise<RetrievedChunkRef[]>;
   getTotalChunksCount(): Promise<number>;
   getEmbeddingDimensions(): Promise<number | null>;
   getChunkMigrationStats?(): Promise<ChunkMigrationStats>;
@@ -964,7 +963,10 @@ export class PostgresBlobStorage implements StorageAdapter {
     options: { provider?: AiProvider; embeddingModel?: string } = {}
   ): Promise<RetrievedChunkRef[]> {
     await this.init();
-    const hasFilter = Array.isArray(documentIds) && documentIds.length > 0;
+    const normalizedDocIds = Array.isArray(documentIds)
+      ? Array.from(new Set(documentIds.map((id) => id.trim()).filter(Boolean)))
+      : [];
+    const hasFilter = normalizedDocIds.length > 0;
 
     if (!this.schemaCaps.hasEmbeddingCfColumn) {
       await this.refreshSchemaCapabilities();
@@ -997,7 +999,7 @@ export class PostgresBlobStorage implements StorageAdapter {
     }
 
     if (hasFilter) {
-      baseParams.push(documentIds);
+      baseParams.push(normalizedDocIds);
       whereClauses.push(`document_id = ANY($${baseParams.length}::text[])`);
     }
 
@@ -1062,29 +1064,6 @@ export class PostgresBlobStorage implements StorageAdapter {
       text: item.text,
       similarity: Number(item.similarity.toFixed(4)),
       distance: Number(item.distance.toFixed(4)),
-    }));
-  }
-
-  async getDocumentChunks(documentId: string, limit = 60): Promise<RetrievedChunkRef[]> {
-    await this.init();
-    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit || 60)));
-    const res = await this.pool.query(
-      `SELECT chunk_id, document_id, filename, page_number, text
-       FROM documind_chunks
-       WHERE document_id = $1
-       ORDER BY page_number ASC, chunk_id ASC
-       LIMIT $2`,
-      [documentId, safeLimit]
-    );
-    return res.rows.map((row, idx) => ({
-      rank: idx + 1,
-      chunk_id: String(row.chunk_id),
-      document_id: String(row.document_id),
-      filename: String(row.filename),
-      page_number: Number(row.page_number),
-      text: String(row.text),
-      similarity: 1,
-      distance: 0,
     }));
   }
 
@@ -1648,8 +1627,10 @@ export class LocalDevJsonStorage implements StorageAdapter {
     documentIds?: string[],
     options: { provider?: AiProvider; embeddingModel?: string } = {}
   ): Promise<RetrievedChunkRef[]> {
-    const scopeSet =
-      documentIds && documentIds.length > 0 ? new Set(documentIds) : null;
+    const normalizedDocIds = Array.isArray(documentIds)
+      ? Array.from(new Set(documentIds.map((id) => id.trim()).filter(Boolean)))
+      : [];
+    const scopeSet = normalizedDocIds.length > 0 ? new Set(normalizedDocIds) : null;
 
     const candidates = this.store.chunks.filter((c) => {
       if (scopeSet && !scopeSet.has(c.document_id)) return false;
@@ -1687,29 +1668,6 @@ export class LocalDevJsonStorage implements StorageAdapter {
       text: item.chunk.text,
       similarity: Number(item.similarity.toFixed(4)),
       distance: Number(item.distance.toFixed(4)),
-    }));
-  }
-
-  async getDocumentChunks(documentId: string, limit = 60): Promise<RetrievedChunkRef[]> {
-    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit || 60)));
-    const doc = this.store.documents[documentId];
-    if (!doc || doc.status !== "Indexed Successfully") {
-      return [];
-    }
-    const ordered = this.store.chunks
-      .filter((c) => c.document_id === documentId)
-      .sort((a, b) => a.page_number - b.page_number || a.chunk_id.localeCompare(b.chunk_id))
-      .slice(0, safeLimit);
-
-    return ordered.map((chunk, idx) => ({
-      rank: idx + 1,
-      chunk_id: chunk.chunk_id,
-      document_id: chunk.document_id,
-      filename: chunk.filename,
-      page_number: chunk.page_number,
-      text: chunk.text,
-      similarity: 1,
-      distance: 0,
     }));
   }
 
@@ -1828,7 +1786,6 @@ class UnconfiguredProductionStorage implements StorageAdapter {
   async insertChunks(): Promise<void> { throw this.missingMessage(); }
   async deleteDocument(): Promise<{ deleted: boolean }> { throw this.missingMessage(); }
   async searchSimilarChunks(): Promise<RetrievedChunkRef[]> { throw this.missingMessage(); }
-  async getDocumentChunks(): Promise<RetrievedChunkRef[]> { throw this.missingMessage(); }
   async getTotalChunksCount(): Promise<number> { throw this.missingMessage(); }
   async getEmbeddingDimensions(): Promise<number | null> { throw this.missingMessage(); }
   async getChunkMigrationStats(): Promise<ChunkMigrationStats> { throw this.missingMessage(); }
@@ -1842,14 +1799,15 @@ class UnconfiguredProductionStorage implements StorageAdapter {
 }
 
 let cachedAdapter: StorageAdapter | null = null;
-let testAdapterOverride: StorageAdapter | null = null;
+let testStorageOverride: StorageAdapter | null = null;
 
 export function setStorageAdapterForTest(adapter: StorageAdapter | null): void {
-  testAdapterOverride = adapter;
+  testStorageOverride = adapter;
+  cachedAdapter = null;
 }
 
 export function getStorageAdapter(): StorageAdapter {
-  if (testAdapterOverride) return testAdapterOverride;
+  if (testStorageOverride) return testStorageOverride;
   if (cachedAdapter) return cachedAdapter;
   const dbUrl = process.env.DATABASE_URL?.trim();
   if (dbUrl) {

@@ -5,7 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { Pool } from "pg";
-import { createApiApp, JSON_BODY_MAX_BYTES } from "../server/app.js";
+import { createApiApp } from "../server/app.js";
 import {
   embedQuery,
   formatAiError,
@@ -30,9 +30,7 @@ import {
 } from "../server/cloudflareClient.js";
 import { chunkPageText } from "../server/ragEngine.js";
 import {
-  buildDocumentComparisonPrompt,
   buildOptimizedRagPrompt,
-  DOC_COMPARE_MAX_CONTEXT_CHARS,
   RAG_MAX_CONTEXT_CHARS,
   RAG_MAX_OUTPUT_TOKENS,
 } from "../server/ragPrompt.js";
@@ -233,6 +231,9 @@ function createInMemoryPostgresTestPool(options: {
     if (normalized.includes("embedding_cf <=>")) {
       const embeddingModel = String(params[0] ?? "@cf/baai/bge-m3");
       const expectedDims = Number(params[1] ?? 1024);
+      const anyMatch = normalized.match(/document_id = ANY\(\$(\d+)::text\[\]\)/);
+      const docFilter = anyMatch ? (params[Number(anyMatch[1]) - 1] as string[]) : null;
+      const docFilterSet = Array.isArray(docFilter) && docFilter.length > 0 ? new Set(docFilter) : null;
       const queryVec = JSON.parse(String(params[params.length - 2])) as number[];
       const topK = Number(params[params.length - 1] ?? 3);
 
@@ -240,6 +241,7 @@ function createInMemoryPostgresTestPool(options: {
         .filter((r) => {
           if (r.embedding_cf === null) return false;
           if (r.embedding_cf_model !== embeddingModel) return false;
+          if (docFilterSet && !docFilterSet.has(r.document_id)) return false;
           const vec = JSON.parse(r.embedding_cf) as number[];
           return vec.length === expectedDims;
         })
@@ -367,23 +369,6 @@ function createInMemoryPostgresTestPool(options: {
         });
       }
       return { rows: [], rowCount: 1 };
-    }
-
-    if (normalized.includes("FROM documind_chunks WHERE document_id = $1 ORDER BY page_number ASC")) {
-      const docId = String(params[0] ?? "");
-      const limit = Number(params[1] ?? 60);
-      const matched = rows
-        .filter((r) => r.document_id === docId)
-        .sort((a, b) => a.page_number - b.page_number || a.chunk_id.localeCompare(b.chunk_id))
-        .slice(0, limit)
-        .map((r) => ({
-          chunk_id: r.chunk_id,
-          document_id: r.document_id,
-          filename: r.filename,
-          page_number: r.page_number,
-          text: r.text,
-        }));
-      return { rows: matched, rowCount: matched.length };
     }
 
     throw new Error(`Unexpected test SQL query: ${normalized}`);
@@ -1002,10 +987,6 @@ async function runStorageRetrievalAndSafetyTests() {
       () => pgStorage.searchSimilarChunks(unitVec(3072, 0), 3),
       /Vector dimension mismatch/i
     );
-
-    const docChunks = await pgStorage.getDocumentChunks("doc_cf", 10);
-    assert.equal(docChunks.length, 1);
-    assert.equal(docChunks[0].chunk_id, "cf_row");
   }
 
   // 11. Database identity, Preview isolation, Production guards, and resumable/idempotent backfill
@@ -1488,278 +1469,13 @@ async function runHttpApiAndHealthTests() {
       assert.equal(inspectBody.ai_provider, "cloudflare");
       assert.equal(inspectBody.embedding_model, "@cf/baai/bge-m3");
 
-      // 13c. Oversized comparison payloads, inline PDF/base64/text rejection, and ID-based document compare
-      for (const compareEndpoint of ["/api/documents/compare", "/api/chat/compare", "/api/rag/compare"]) {
-        const oversizedBody = JSON.stringify({
-          document_ids: ["doc-a", "doc-b"],
-          question: "Compare these documents",
-          extracted_text: "A".repeat(JSON_BODY_MAX_BYTES + 10_000),
-        });
-        const oversizedResp = await realFetch(`${baseUrl}${compareEndpoint}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: oversizedBody,
-        });
-        assert.equal(
-          oversizedResp.status,
-          413,
-          `${compareEndpoint} must reject >64KB JSON payloads with HTTP 413`
-        );
-        const oversizedJson = (await oversizedResp.json()) as { detail: string };
-        assert.match(oversizedJson.detail, /too large|document_ids/i);
-      }
-
-      // Chunked transfer without Content-Length exceeding JSON_BODY_MAX_BYTES triggers Express 413 handler
-      const chunkedStatus = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-        const req = http.request(
-          `${baseUrl}/api/documents/compare`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Transfer-Encoding": "chunked",
-            },
-          },
-          (res) => {
-            const chunks: Buffer[] = [];
-            res.on("data", (c: Buffer) => chunks.push(c));
-            res.on("end", () =>
-              resolve({
-                status: res.statusCode ?? 0,
-                body: Buffer.concat(chunks).toString("utf8"),
-              })
-            );
-          }
-        );
-        req.on("error", reject);
-        req.write('{"document_ids":["doc-a","doc-b"],"question":"');
-        req.write("B".repeat(JSON_BODY_MAX_BYTES + 4_096));
-        req.end('"}');
-      });
-      assert.equal(chunkedStatus.status, 413);
-      const chunkedJson = JSON.parse(chunkedStatus.body) as { detail: string };
-      assert.match(chunkedJson.detail, /too large|document_ids/i);
-
-      // Small inline PDF / base64 / raw document text fields are rejected with clear guidance
-      for (const badPayload of [
-        { document_ids: ["doc-a", "doc-b"], pdf_base64: "JVBERi0xLjQK" },
-        { document_ids: ["doc-a", "doc-b"], extracted_text: "Full raw PDF text" },
-        { document_ids: ["doc-a", "doc-b"], question: "data:application/pdf;base64,JVBERi0=" },
-        { document_ids: ["doc-a", "doc-b"], question: "Q".repeat(4_500) },
-      ]) {
-        const badResp = await realFetch(`${baseUrl}/api/documents/compare`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(badPayload),
-        });
-        assert.ok(badResp.status === 400 || badResp.status === 413);
-        const badJson = (await badResp.json()) as { detail: string };
-        assert.ok(badJson.detail.length > 10);
-      }
-
-      // ID-based document comparison fetches chunks server-side, bounds context, and preserves citations from both docs
-      const compareTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "documind-doc-compare-"));
-      try {
-        const compareStore = new LocalDevJsonStorage(path.join(compareTmpDir, "store.json"));
-        setStorageAdapterForTest(compareStore);
-
-        const bulkyA = "Policy A requires 365-day immutable audit log retention and AES-256 encryption. ";
-        const bulkyB = "Policy B requires 730-day immutable audit log retention and ChaCha20 encryption. ";
-
-        await compareStore.insertDocument({
-          id: "doc-a",
-          filename: "Policy_v1.pdf",
-          size_bytes: 2_500_000,
-          pages: 4,
-          chunks_count: 4,
-          status: "Indexed Successfully",
-          progress: 100,
-          error_message: null,
-          sha256: "sha-a",
-          uploaded_at: new Date().toISOString(),
-        });
-        await compareStore.insertDocument({
-          id: "doc-b",
-          filename: "Policy_v2.pdf",
-          size_bytes: 3_100_000,
-          pages: 4,
-          chunks_count: 4,
-          status: "Indexed Successfully",
-          progress: 100,
-          error_message: null,
-          sha256: "sha-b",
-          uploaded_at: new Date().toISOString(),
-        });
-
-        await compareStore.insertChunks([
-          ...[1, 2, 3, 4].map((p) => ({
-            chunk_id: `doc-a_p${p}_c0`,
-            document_id: "doc-a",
-            filename: "Policy_v1.pdf",
-            page_number: p,
-            text: `Page ${p}: ${bulkyA.repeat(24)}`,
-            token_count: 250,
-            embedding: null,
-            embedding_model: null,
-            embedding_cf: unitVec(1024, p === 1 ? 0 : 5 + p),
-            embedding_cf_model: "@cf/baai/bge-m3",
-          })),
-          ...[1, 2, 3, 4].map((p) => ({
-            chunk_id: `doc-b_p${p}_c0`,
-            document_id: "doc-b",
-            filename: "Policy_v2.pdf",
-            page_number: p,
-            text: `Page ${p}: ${bulkyB.repeat(24)}`,
-            token_count: 250,
-            embedding: null,
-            embedding_model: null,
-            embedding_cf: unitVec(1024, p === 2 ? 0 : 15 + p),
-            embedding_cf_model: "@cf/baai/bge-m3",
-          })),
-        ]);
-
-        // Duplicate document IDs rejected
-        const sameIdResp = await realFetch(`${baseUrl}/api/documents/compare`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ document_ids: ["doc-a", "doc-a"] }),
-        });
-        assert.equal(sameIdResp.status, 400);
-
-        // Unknown document ID rejected with 404
-        const missingDocResp = await realFetch(`${baseUrl}/api/documents/compare`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ document_ids: ["doc-a", "doc-missing"] }),
-        });
-        assert.equal(missingDocResp.status, 404);
-
-        // Focused semantic comparison sends tiny ID payload and preserves citations from both docs
-        let lastComparePromptSent = "";
-        setCloudflareFetchForTest(async (input, init) => {
-          const url = String(input);
-          if (url.endsWith("/ai/v1/embeddings")) {
-            return new Response(
-              JSON.stringify({ data: [{ index: 0, embedding: unitVec(1024, 0) }] }),
-              { status: 200 }
-            );
-          }
-          const body = JSON.parse(String(init?.body)) as {
-            model: string;
-            messages: Array<{ role: string; content: string }>;
-          };
-          assert.equal(body.model, "@cf/meta/llama-4-scout-17b-16e-instruct");
-          lastComparePromptSent = body.messages[1].content;
-          return new Response(
-            JSON.stringify({
-              choices: [
-                {
-                  message: {
-                    content:
-                      "### Key Differences\n- Policy v1 mandates 365-day retention [Policy_v1.pdf, p. 1], whereas Policy v2 extends retention to 730 days [Policy_v2.pdf, p. 2].",
-                  },
-                },
-              ],
-            }),
-            { status: 200 }
-          );
-        });
-
-        const docCompareResp = await realFetch(`${baseUrl}/api/documents/compare`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            document_ids: ["doc-a", "doc-b"],
-            question: "Compare audit retention and encryption standards",
-            top_k: 4,
-          }),
-        });
-        assert.equal(docCompareResp.status, 200);
-        const docCompareBody = (await docCompareResp.json()) as {
-          ai_provider: string;
-          model: string;
-          documents: Array<{ id: string; filename: string; retrieved_chunks: number }>;
-          comparison: string;
-          sources: Array<{ document_id: string; filename: string; page_number: number }>;
-          context_stats: { context_chars: number; max_context_chars: number; optimized_chunks: number };
-        };
-        assert.equal(docCompareBody.ai_provider, "cloudflare");
-        assert.equal(docCompareBody.model, "@cf/meta/llama-4-scout-17b-16e-instruct");
-        assert.equal(docCompareBody.documents.length, 2);
-        assert.ok(docCompareBody.sources.some((s) => s.document_id === "doc-a"));
-        assert.ok(docCompareBody.sources.some((s) => s.document_id === "doc-b"));
-        assert.ok(docCompareBody.comparison.includes("[Policy_v1.pdf, p. 1]"));
-        assert.ok(docCompareBody.comparison.includes("[Policy_v2.pdf, p. 2]"));
-        assert.ok(docCompareBody.context_stats.context_chars <= DOC_COMPARE_MAX_CONTEXT_CHARS);
-        assert.ok(lastComparePromptSent.includes("Policy_v1.pdf"));
-        assert.ok(lastComparePromptSent.includes("Policy_v2.pdf"));
-
-        // Broad comparison (no focus question) works using sampled DB chunks without embedding call
-        let broadEmbedCalled = false;
-        setCloudflareFetchForTest(async (input) => {
-          const url = String(input);
-          if (url.endsWith("/ai/v1/embeddings")) {
-            broadEmbedCalled = true;
-          }
-          return new Response(
-            JSON.stringify({
-              choices: [
-                {
-                  message: {
-                    content:
-                      "Both documents define audit policies [Policy_v1.pdf, p. 1] [Policy_v2.pdf, p. 1].",
-                  },
-                },
-              ],
-            }),
-            { status: 200 }
-          );
-        });
-
-        const broadCompareResp = await realFetch(`${baseUrl}/api/documents/compare`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ document_ids: ["doc-a", "doc-b"] }),
-        });
-        assert.equal(broadCompareResp.status, 200);
-        assert.equal(broadEmbedCalled, false);
-        const broadBody = (await broadCompareResp.json()) as {
-          sources: Array<{ document_id: string }>;
-          context_stats: { context_chars: number };
-        };
-        assert.ok(broadBody.sources.some((s) => s.document_id === "doc-a"));
-        assert.ok(broadBody.sources.some((s) => s.document_id === "doc-b"));
-        assert.ok(broadBody.context_stats.context_chars <= DOC_COMPARE_MAX_CONTEXT_CHARS);
-
-        // Prompt builder unit check for balanced per-doc context cap
-        const promptCheck = buildDocumentComparisonPrompt({
-          documents: [
-            { id: "doc-a", filename: "Policy_v1.pdf", pages: 4 },
-            { id: "doc-b", filename: "Policy_v2.pdf", pages: 4 },
-          ],
-          chunksByDocument: new Map([
-            ["doc-a", await compareStore.getDocumentChunks("doc-a", 4)],
-            ["doc-b", await compareStore.getDocumentChunks("doc-b", 4)],
-          ]),
-        });
-        assert.ok(promptCheck.contextChars <= DOC_COMPARE_MAX_CONTEXT_CHARS);
-        assert.ok(promptCheck.passages.some((p) => p.chunk.document_id === "doc-a"));
-        assert.ok(promptCheck.passages.some((p) => p.chunk.document_id === "doc-b"));
-      } finally {
-        setStorageAdapterForTest(null);
-        fs.rmSync(compareTmpDir, { recursive: true, force: true });
-      }
-
-      console.log(
-        "PASS: Express /api/health, /api/chat/compare, /api/documents/compare, 413 payload guards, and /api/retrieval/inspect tests passed (4/4)."
-      );
+      console.log("PASS: Express /api/health, /api/chat/compare, and /api/retrieval/inspect tests passed (2/2).");
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve()))
       );
     }
   } finally {
-    setStorageAdapterForTest(null);
     setCloudflareFetchForTest(null);
     clearCloudflareCachesForTest();
     for (const [key, val] of Object.entries(prevEnv)) {
@@ -2196,11 +1912,307 @@ async function runEndToEndMigrationAndBackfillTests() {
   );
 }
 
+async function runDocumentIsolationAndInspectorTraceTests() {
+  const prevEnv = {
+    CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
+  };
+
+  // Weighted 1024d vectors where query=[1,0,...], SE doc=[0.99,0.14,...] (higher global match),
+  // and AI doc=[0.80,0.60,...] (lower global match, but must win 100% when scoped to AI doc).
+  const queryVec = unitVec(1024, 0);
+  const seVec = new Array<number>(1024).fill(0);
+  seVec[0] = 0.99;
+  seVec[1] = 0.14;
+  const aiVec = new Array<number>(1024).fill(0);
+  aiVec[0] = 0.8;
+  aiVec[1] = 0.6;
+
+  const aiDocId = "doc-ai-assignment";
+  const seDocId = "doc-se-assignment";
+  const aiFilename = "AI_Assignment.pdf";
+  const seFilename = "2026_11_23_11_23_16_275.pdf";
+
+  // 18. PostgreSQL vector query applies document_id = ANY(...) filtering strictly
+  {
+    const previewUrl = "postgresql://user:supersecret@ep-preview-branch.neon.tech/documind_preview";
+    const testDb = createInMemoryPostgresTestPool({
+      databaseName: "documind_preview",
+      initialChunks: [
+        {
+          chunk_id: `${aiDocId}_p1_c0`,
+          document_id: aiDocId,
+          filename: aiFilename,
+          page_number: 1,
+          text: "AI Planning with STRIPS operators, CSP backtracking, BFS, and DFS search.",
+          token_count: 11,
+          embedding: null,
+          embedding_model: null,
+          embedding_cf: JSON.stringify(aiVec),
+          embedding_cf_model: "@cf/baai/bge-m3",
+        },
+        {
+          chunk_id: `${seDocId}_p1_c0`,
+          document_id: seDocId,
+          filename: seFilename,
+          page_number: 1,
+          text: "Software Engineering Assignment: SDLC phases, Waterfall vs Agile, and UML diagrams.",
+          token_count: 12,
+          embedding: null,
+          embedding_model: null,
+          embedding_cf: JSON.stringify(seVec),
+          embedding_cf_model: "@cf/baai/bge-m3",
+        },
+      ],
+    });
+
+    const pgStorage = new PostgresBlobStorage(previewUrl, testDb.pool);
+
+    // Scoped strictly to AI_Assignment.pdf
+    const scopedAiHits = await pgStorage.searchSimilarChunks(queryVec, 3, [aiDocId], {
+      provider: "cloudflare",
+      embeddingModel: "@cf/baai/bge-m3",
+    });
+    assert.equal(scopedAiHits.length, 1);
+    assert.equal(scopedAiHits[0].document_id, aiDocId);
+    assert.equal(scopedAiHits[0].filename, aiFilename);
+    assert.ok(
+      testDb.executedQueries.some((q) => q.includes("document_id = ANY(")),
+      "PostgreSQL similarity search must filter by document_id = ANY(...) when documentIds are provided"
+    );
+
+    // Multi-document retrieval (explicit both IDs & undefined) returns both, ranked by similarity
+    const multiHits = await pgStorage.searchSimilarChunks(queryVec, 3, [aiDocId, seDocId], {
+      provider: "cloudflare",
+      embeddingModel: "@cf/baai/bge-m3",
+    });
+    assert.equal(multiHits.length, 2);
+    assert.equal(multiHits[0].document_id, seDocId);
+    assert.equal(multiHits[1].document_id, aiDocId);
+
+    const globalHits = await pgStorage.searchSimilarChunks(queryVec, 3, undefined, {
+      provider: "cloudflare",
+      embeddingModel: "@cf/baai/bge-m3",
+    });
+    assert.equal(globalHits.length, 2);
+    assert.equal(globalHits[0].document_id, seDocId);
+  }
+
+  // 19. End-to-end HTTP regression: two PDFs (AI vs Software Engineering), document isolation,
+  //     exact request_id + prompt trace association, and multi-doc / Compare preservation.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "documind-isolation-test-"));
+  try {
+    process.env.CLOUDFLARE_ACCOUNT_ID = "cf-iso-account";
+    process.env.CLOUDFLARE_API_TOKEN = "cf-iso-token";
+    clearCloudflareCachesForTest();
+
+    const store = new LocalDevJsonStorage(path.join(tmpDir, "store.json"));
+    await store.insertDocument({
+      id: aiDocId,
+      filename: aiFilename,
+      size_bytes: 2048,
+      pages: 2,
+      chunks_count: 1,
+      status: "Indexed Successfully",
+      progress: 100,
+      error_message: null,
+      sha256: "sha-ai-assignment",
+      uploaded_at: new Date().toISOString(),
+    });
+    await store.insertDocument({
+      id: seDocId,
+      filename: seFilename,
+      size_bytes: 2048,
+      pages: 2,
+      chunks_count: 1,
+      status: "Indexed Successfully",
+      progress: 100,
+      error_message: null,
+      sha256: "sha-se-assignment",
+      uploaded_at: new Date().toISOString(),
+    });
+    await store.insertChunks([
+      {
+        chunk_id: `${aiDocId}_p1_c0`,
+        document_id: aiDocId,
+        filename: aiFilename,
+        page_number: 1,
+        text: "This AI assignment covers AI planning, STRIPS operators, Constraint Satisfaction Problems (CSPs), BFS, and DFS.",
+        token_count: 17,
+        embedding: null,
+        embedding_model: null,
+        embedding_cf: aiVec,
+        embedding_cf_model: "@cf/baai/bge-m3",
+      },
+      {
+        chunk_id: `${seDocId}_p1_c0`,
+        document_id: seDocId,
+        filename: seFilename,
+        page_number: 1,
+        text: "This Software Engineering assignment covers SDLC models, Agile sprints, requirements engineering, and UML class diagrams.",
+        token_count: 17,
+        embedding: null,
+        embedding_model: null,
+        embedding_cf: seVec,
+        embedding_cf_model: "@cf/baai/bge-m3",
+      },
+    ]);
+    setStorageAdapterForTest(store);
+
+    setCloudflareFetchForTest(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/ai/v1/embeddings")) {
+        return new Response(
+          JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      const userPrompt = body.messages[1].content;
+      const content = userPrompt.includes(aiFilename)
+        ? `The document covers AI planning, STRIPS, CSPs, BFS, and DFS [${aiFilename}, p. 1].`
+        : userPrompt.includes(seFilename)
+        ? `The document covers SDLC, Agile, and UML [${seFilename}, p. 1].`
+        : "General answer without document context.";
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content } }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+
+    const expressApp = createApiApp();
+    const server = http.createServer(expressApp);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    try {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        throw new Error("Failed to bind ephemeral isolation test port");
+      }
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const realFetch = globalThis.fetch;
+
+      const question = "What is the main topic of this document?";
+
+      // Ask scoped to AI_Assignment.pdf
+      const chatResp = await realFetch(`${baseUrl}/api/chat/ask`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          document_ids: [aiDocId],
+          top_k: 3,
+        }),
+      });
+      assert.equal(chatResp.status, 200);
+      const chatBody = (await chatResp.json()) as {
+        request_id: string;
+        question: string;
+        document_ids: string[];
+        answer: string;
+        sources: Array<{ chunk_id: string; document_id: string; filename: string }>;
+        prompt_preview: string;
+      };
+      assert.ok(chatBody.request_id && chatBody.request_id.length > 0);
+      assert.deepEqual(chatBody.document_ids, [aiDocId]);
+      assert.equal(chatBody.sources.length, 1);
+      assert.equal(chatBody.sources[0].document_id, aiDocId);
+      assert.equal(chatBody.sources[0].filename, aiFilename);
+      assert.ok(chatBody.prompt_preview.includes(aiFilename));
+      assert.ok(!chatBody.prompt_preview.includes(seFilename));
+      assert.ok(chatBody.answer.includes("STRIPS"));
+
+      // Inspect scoped to AI_Assignment.pdf returns consistent chunks, request_id, and prompt
+      const scopedInspectResp = await realFetch(`${baseUrl}/api/retrieval/inspect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          document_ids: [aiDocId],
+          top_k: 3,
+        }),
+      });
+      assert.equal(scopedInspectResp.status, 200);
+      const scopedInspect = (await scopedInspectResp.json()) as {
+        request_id: string;
+        document_ids: string[];
+        chunks: Array<{ chunk_id: string; document_id: string; filename: string; similarity: number }>;
+        prompt_preview: string;
+        answer: string;
+      };
+      assert.ok(scopedInspect.request_id && scopedInspect.request_id.length > 0);
+      assert.deepEqual(scopedInspect.document_ids, [aiDocId]);
+      assert.equal(scopedInspect.chunks.length, 1);
+      assert.equal(scopedInspect.chunks[0].document_id, aiDocId);
+      assert.equal(scopedInspect.chunks[0].filename, aiFilename);
+      assert.ok(scopedInspect.prompt_preview.includes(aiFilename));
+      assert.ok(!scopedInspect.prompt_preview.includes(seFilename));
+
+      // Multi-document retrieval & Compare Documents remain preserved when unscoped or multi-scoped
+      const multiInspectResp = await realFetch(`${baseUrl}/api/retrieval/inspect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          top_k: 3,
+        }),
+      });
+      assert.equal(multiInspectResp.status, 200);
+      const multiInspect = (await multiInspectResp.json()) as {
+        document_ids: string[];
+        chunks: Array<{ document_id: string; filename: string }>;
+      };
+      assert.deepEqual(multiInspect.document_ids, []);
+      assert.equal(multiInspect.chunks.length, 2);
+      assert.equal(multiInspect.chunks[0].filename, seFilename);
+
+      const compareResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          document_ids: [aiDocId, seDocId],
+          top_k: 3,
+        }),
+      });
+      assert.equal(compareResp.status, 200);
+      const compareBody = (await compareResp.json()) as {
+        request_id: string;
+        document_ids: string[];
+        with_rag: { sources: Array<{ document_id: string }> };
+      };
+      assert.ok(compareBody.request_id);
+      assert.deepEqual(compareBody.document_ids, [aiDocId, seDocId]);
+      assert.equal(compareBody.with_rag.sources.length, 2);
+
+      console.log(
+        "PASS: Document isolation, PostgreSQL document_id filtering, Inspector trace association, and multi-doc/compare tests passed (2/2)."
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
+  } finally {
+    setStorageAdapterForTest(null);
+    setCloudflareFetchForTest(null);
+    clearCloudflareCachesForTest();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const [key, val] of Object.entries(prevEnv)) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  }
+}
+
 async function main() {
   await runCloudflareOnlyCoreTests();
   await runStorageRetrievalAndSafetyTests();
   await runEndToEndMigrationAndBackfillTests();
   await runHttpApiAndHealthTests();
+  await runDocumentIsolationAndInspectorTraceTests();
   await runOptionalLiveCloudflareSmokeTest();
 }
 
