@@ -1,5 +1,9 @@
 import {
   buildOptimizedRagPrompt,
+  RAG_COMPACT_MAX_CHUNK_CHARS,
+  RAG_COMPACT_MAX_CHUNKS,
+  RAG_COMPACT_MAX_CONTEXT_CHARS,
+  RAG_COMPACT_MAX_OUTPUT_TOKENS,
   RAG_MAX_OUTPUT_TOKENS,
   redactSecrets,
   RetrievedChunkRef,
@@ -20,11 +24,14 @@ const DEPRECATED_CLOUDFLARE_CHAT_MODELS = new Set([
   "@cf/meta/llama-3.2-1b-instruct",
 ]);
 
-const CF_GENERATE_TIMEOUT_MS = 15_000;
-const CF_GENERATE_TOTAL_BUDGET_MS = 24_000;
-const CF_COMPARE_TOTAL_BUDGET_MS = 38_000;
-const CF_EMBED_TIMEOUT_MS = 10_000;
-const CF_EMBED_TOTAL_BUDGET_MS = 20_000;
+export const CF_GENERATE_TIMEOUT_MS = 32_000;
+export const CF_GENERATE_TOTAL_BUDGET_MS = 46_000;
+export const CF_COMPARE_TOTAL_BUDGET_MS = 46_000;
+export const CF_EMBED_TIMEOUT_MS = 12_000;
+export const CF_EMBED_TOTAL_BUDGET_MS = 24_000;
+export const CF_QUERY_EMBED_TIMEOUT_MS = 9_000;
+export const CF_QUERY_EMBED_TOTAL_BUDGET_MS = 15_000;
+const CF_COMPACT_RETRY_MIN_ROOM_MS = 8_000;
 
 const CF_EMBED_BATCH_SIZE = 15;
 
@@ -32,6 +39,7 @@ const CF_MAX_CONCURRENT_REQUESTS = 3;
 const DEFAULT_MAX_ATTEMPTS = 2;
 const BASE_RATE_LIMIT_DELAY_MS = 1_000;
 const BASE_TRANSIENT_DELAY_MS = 600;
+const BASE_TIMEOUT_RETRY_DELAY_MS = 200;
 const MAX_BACKOFF_DELAY_MS = 5_000;
 
 const QUERY_EMBED_CACHE_MAX = 100;
@@ -602,6 +610,7 @@ async function callCloudflareJson<T>(
     attemptTimeoutMs?: number;
     totalBudgetMs?: number;
     deadlineMs?: number;
+    retryOnTimeout?: boolean;
   } = {}
 ): Promise<T> {
   const { accountId, apiToken } = getCloudflareCredentials();
@@ -671,8 +680,10 @@ async function callCloudflareJson<T>(
     } catch (err: unknown) {
       lastErr = err;
       const classified = classifyCloudflareError(err);
+      const shouldRetry =
+        classified.retryable || (Boolean(options.retryOnTimeout) && classified.kind === "timeout");
 
-      if (!classified.retryable || attempt === maxAttempts) {
+      if (!shouldRetry || attempt === maxAttempts) {
         if (classified.kind === "quota_exhausted") {
           throw new CloudflareQuotaExhaustedError(formatCloudflareError(err).message);
         }
@@ -693,14 +704,21 @@ async function callCloudflareJson<T>(
 
       const timeLeftAfter = deadline - Date.now();
       const delayMs =
-        classified.retryAfterMs !== undefined && classified.retryAfterMs > 0
+        classified.kind === "timeout"
+          ? BASE_TIMEOUT_RETRY_DELAY_MS
+          : classified.retryAfterMs !== undefined && classified.retryAfterMs > 0
           ? classified.retryAfterMs + Math.floor(Math.random() * 250)
           : computeExponentialBackoffWithJitter(
               classified.kind === "rate_limit" ? BASE_RATE_LIMIT_DELAY_MS : BASE_TRANSIENT_DELAY_MS,
               attempt
             );
 
-      const minAttemptRoomMs = effectiveTotalBudgetMs < 5_000 ? 150 : 3_000;
+      const minAttemptRoomMs =
+        effectiveTotalBudgetMs < 5_000
+          ? 150
+          : classified.kind === "timeout" && path.includes("/chat/completions")
+          ? CF_COMPACT_RETRY_MIN_ROOM_MS
+          : 3_000;
       if (delayMs + minAttemptRoomMs > timeLeftAfter) {
         if (classified.kind === "rate_limit") {
           throw new CloudflareRateLimitError(
@@ -915,7 +933,13 @@ function validateEmbeddingVector(raw: unknown, expectedDims: number): number[] {
 
 export async function generateCloudflareEmbeddings(
   texts: string[],
-  options: { deadlineMs?: number; attemptTimeoutMs?: number; totalBudgetMs?: number; maxAttempts?: number } = {}
+  options: {
+    deadlineMs?: number;
+    attemptTimeoutMs?: number;
+    totalBudgetMs?: number;
+    maxAttempts?: number;
+    retryOnTimeout?: boolean;
+  } = {}
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
   const model = getCloudflareEmbeddingModel();
@@ -947,6 +971,7 @@ export async function generateCloudflareEmbeddings(
         attemptTimeoutMs: options.attemptTimeoutMs ?? CF_EMBED_TIMEOUT_MS,
         totalBudgetMs: options.totalBudgetMs ?? CF_EMBED_TOTAL_BUDGET_MS,
         deadlineMs: options.deadlineMs,
+        retryOnTimeout: options.retryOnTimeout ?? true,
       }
     );
 
@@ -984,7 +1009,12 @@ export async function embedCloudflareQuery(
   if (inFlight) return inFlight;
 
   const promise = (async () => {
-    const [vector] = await generateCloudflareEmbeddings([normalized], options);
+    const [vector] = await generateCloudflareEmbeddings([normalized], {
+      deadlineMs: options.deadlineMs,
+      attemptTimeoutMs: options.attemptTimeoutMs ?? CF_QUERY_EMBED_TIMEOUT_MS,
+      totalBudgetMs: options.totalBudgetMs ?? CF_QUERY_EMBED_TOTAL_BUDGET_MS,
+      retryOnTimeout: true,
+    });
     writeTtlCache(
       queryEmbeddingCache,
       cacheKey,
@@ -1048,12 +1078,12 @@ export async function generateCloudflareRagAnswer(
     deadlineMs?: number;
   } = {}
 ): Promise<{ answer: string; promptPreview: string }> {
-  const { promptPreview } = buildOptimizedRagPrompt(question, chunks);
+  const primaryPrompt = buildOptimizedRagPrompt(question, chunks);
   if (chunks.length === 0) {
     return {
       answer:
         "I could not find relevant information in your uploaded documents because no indexed passages matched your query. Please upload or select indexed PDF documents and try again.",
-      promptPreview,
+      promptPreview: primaryPrompt.promptPreview,
     };
   }
 
@@ -1063,30 +1093,89 @@ export async function generateCloudflareRagAnswer(
   if (inFlight) return inFlight;
 
   const promise = (async () => {
-    const res = await callCloudflareJson<OpenAiChatCompletionResponse>(
-      "/chat/completions",
-      {
-        model,
-        messages: [
-          { role: "system", content: CF_RAG_SYSTEM_INSTRUCTION },
-          { role: "user", content: promptPreview },
-        ],
-        max_tokens: CLOUDFLARE_CHAT_MAX_TOKENS,
-        temperature: CLOUDFLARE_CHAT_TEMPERATURE,
-        stream: false,
-      },
-      {
-        maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
-        attemptTimeoutMs: options.attemptTimeoutMs ?? CF_GENERATE_TIMEOUT_MS,
-        totalBudgetMs: options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS,
-        deadlineMs: options.deadlineMs,
-      }
-    );
+    const startedAt = Date.now();
+    const totalBudgetMs = options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS;
+    const effectiveDeadline =
+      options.deadlineMs !== undefined
+        ? Math.min(startedAt + totalBudgetMs, options.deadlineMs)
+        : startedAt + totalBudgetMs;
+    const attemptTimeoutMs = options.attemptTimeoutMs ?? CF_GENERATE_TIMEOUT_MS;
+    const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
 
-    return {
-      answer: extractChatContent(res),
-      promptPreview,
-    };
+    const sendChat = (
+      promptText: string,
+      maxTokens: number,
+      callOpts: {
+        maxAttempts: number;
+        attemptTimeoutMs: number;
+        totalBudgetMs: number;
+        deadlineMs: number;
+        retryOnTimeout?: boolean;
+      }
+    ) =>
+      callCloudflareJson<OpenAiChatCompletionResponse>(
+        "/chat/completions",
+        {
+          model,
+          messages: [
+            { role: "system", content: CF_RAG_SYSTEM_INSTRUCTION },
+            { role: "user", content: promptText },
+          ],
+          max_tokens: maxTokens,
+          temperature: CLOUDFLARE_CHAT_TEMPERATURE,
+          stream: false,
+        },
+        callOpts
+      );
+
+    try {
+      const res = await sendChat(primaryPrompt.promptPreview, CLOUDFLARE_CHAT_MAX_TOKENS, {
+        maxAttempts,
+        attemptTimeoutMs,
+        totalBudgetMs,
+        deadlineMs: effectiveDeadline,
+        retryOnTimeout: false,
+      });
+
+      return {
+        answer: extractChatContent(res),
+        promptPreview: primaryPrompt.promptPreview,
+      };
+    } catch (err: unknown) {
+      const classified = classifyCloudflareError(err);
+      const remainingMs = effectiveDeadline - Date.now();
+      const canRetryCompact =
+        classified.kind === "timeout" &&
+        maxAttempts > 1 &&
+        remainingMs >= CF_COMPACT_RETRY_MIN_ROOM_MS;
+
+      if (!canRetryCompact) {
+        throw err;
+      }
+
+      const compactPrompt = buildOptimizedRagPrompt(question, chunks, {
+        maxChunks: RAG_COMPACT_MAX_CHUNKS,
+        maxChunkChars: RAG_COMPACT_MAX_CHUNK_CHARS,
+        maxContextChars: RAG_COMPACT_MAX_CONTEXT_CHARS,
+      });
+
+      console.warn(
+        `[cloudflare] Primary RAG completion timed out; retrying once with compact context (${compactPrompt.contextChars} context chars, ${compactPrompt.deduplicatedChunksCount} chunks, ${remainingMs}ms remaining).`
+      );
+
+      const compactRes = await sendChat(compactPrompt.promptPreview, RAG_COMPACT_MAX_OUTPUT_TOKENS, {
+        maxAttempts: 1,
+        attemptTimeoutMs: Math.min(attemptTimeoutMs, Math.max(1_000, remainingMs - 100)),
+        totalBudgetMs: remainingMs,
+        deadlineMs: effectiveDeadline,
+        retryOnTimeout: false,
+      });
+
+      return {
+        answer: extractChatContent(compactRes),
+        promptPreview: compactPrompt.promptPreview,
+      };
+    }
   })().finally(() => {
     inFlightRagAnswers.delete(dedupeKey);
   });
@@ -1132,6 +1221,7 @@ export async function generateCloudflareWithoutRagAnswer(
         attemptTimeoutMs: options.attemptTimeoutMs ?? CF_GENERATE_TIMEOUT_MS,
         totalBudgetMs: options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS,
         deadlineMs: options.deadlineMs,
+        retryOnTimeout: true,
       }
     );
 
@@ -1145,5 +1235,3 @@ export async function generateCloudflareWithoutRagAnswer(
   inFlightNoRagAnswers.set(cacheKey, promise);
   return promise;
 }
-
-export { CF_COMPARE_TOTAL_BUDGET_MS };

@@ -10,9 +10,20 @@ export interface RetrievedChunkRef {
 }
 
 export const DEFAULT_RAG_TOP_K = 3;
-export const RAG_MAX_CHUNK_CHARS = 1_800;
-export const RAG_MAX_CONTEXT_CHARS = 5_500;
-export const RAG_MAX_OUTPUT_TOKENS = 768;
+export const RAG_MAX_CHUNK_CHARS = 1_100;
+export const RAG_MAX_CONTEXT_CHARS = 3_600;
+export const RAG_MAX_OUTPUT_TOKENS = 512;
+
+export const RAG_COMPACT_MAX_CHUNKS = 2;
+export const RAG_COMPACT_MAX_CHUNK_CHARS = 850;
+export const RAG_COMPACT_MAX_CONTEXT_CHARS = 1_800;
+export const RAG_COMPACT_MAX_OUTPUT_TOKENS = 384;
+
+export interface RagPromptOptions {
+  maxChunks?: number;
+  maxChunkChars?: number;
+  maxContextChars?: number;
+}
 
 export interface OptimizedPassage {
   chunk: RetrievedChunkRef;
@@ -33,9 +44,11 @@ function normalizeWhitespace(text: string): string {
 
 function trimSentenceBoundary(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  const slice = text.slice(0, maxChars);
+  if (maxChars <= 3) return text.slice(0, Math.max(0, maxChars));
+  const limit = maxChars - 3;
+  const slice = text.slice(0, limit);
   const lastSpace = slice.lastIndexOf(" ");
-  const cutoff = lastSpace > Math.floor(maxChars * 0.7) ? lastSpace : maxChars;
+  const cutoff = lastSpace > Math.floor(limit * 0.7) ? lastSpace : limit;
   return `${slice.slice(0, cutoff).trimEnd()}...`;
 }
 
@@ -127,13 +140,20 @@ function hasHighShingleOverlap(candidateShingles: Set<string>, keptShinglesList:
   return false;
 }
 
-export function optimizeChunksForPrompt(chunks: RetrievedChunkRef[]): OptimizedPassage[] {
+export function optimizeChunksForPrompt(
+  chunks: RetrievedChunkRef[],
+  options: RagPromptOptions = {}
+): OptimizedPassage[] {
+  const maxChunkChars = options.maxChunkChars ?? RAG_MAX_CHUNK_CHARS;
+  const maxChunks = options.maxChunks ?? chunks.length;
   const selected: OptimizedPassage[] = [];
   const keptNormalized: string[] = [];
   const keptShingles: Set<string>[] = [];
   const pageWordsMap = new Map<string, string[][]>();
 
   for (const chunk of chunks) {
+    if (selected.length >= maxChunks) break;
+
     const cleaned = normalizeWhitespace(chunk.text);
     if (!cleaned) continue;
 
@@ -159,7 +179,7 @@ export function optimizeChunksForPrompt(chunks: RetrievedChunkRef[]): OptimizedP
       words = stripped;
     }
 
-    const effectiveText = trimSentenceBoundary(words.join(" "), RAG_MAX_CHUNK_CHARS);
+    const effectiveText = trimSentenceBoundary(words.join(" "), maxChunkChars);
     const effectiveWords = effectiveText.split(" ");
     const candidateShingles = buildShingles(effectiveWords);
 
@@ -178,29 +198,54 @@ export function optimizeChunksForPrompt(chunks: RetrievedChunkRef[]): OptimizedP
   return selected;
 }
 
+const PASSAGE_SEPARATOR = "\n\n---\n\n";
+
 export function buildOptimizedRagPrompt(
   question: string,
-  chunks: RetrievedChunkRef[]
+  chunks: RetrievedChunkRef[],
+  options: RagPromptOptions = {}
 ): OptimizedPromptResult {
-  const optimized = optimizeChunksForPrompt(chunks);
+  const maxContextChars = options.maxContextChars ?? RAG_MAX_CONTEXT_CHARS;
+  const maxChunkChars = options.maxChunkChars ?? RAG_MAX_CHUNK_CHARS;
+  const optimized = optimizeChunksForPrompt(chunks, options);
   let contextBlock = "(No matching document passages were retrieved.)";
   const included: OptimizedPassage[] = [];
 
   if (optimized.length > 0) {
     const formattedPassages: string[] = [];
     let totalChars = 0;
+    // Ensure higher topK selections distribute budget fairly instead of allowing early chunks to starve later ones.
+    const perPassageTextCap =
+      optimized.length > 3
+        ? Math.min(maxChunkChars, Math.max(420, Math.floor((maxContextChars - optimized.length * 120) / optimized.length)))
+        : maxChunkChars;
 
     for (const item of optimized) {
-      const { chunk, promptText } = item;
-      const entry = `[Passage ${formattedPassages.length + 1} | File: ${chunk.filename} | Page: ${chunk.page_number} | Chunk ID: ${chunk.chunk_id}]\n${promptText}`;
-      if (totalChars + entry.length > RAG_MAX_CONTEXT_CHARS && formattedPassages.length > 0) {
+      const { chunk } = item;
+      const header = `[Passage ${formattedPassages.length + 1} | File: ${chunk.filename} | Page: ${chunk.page_number} | Chunk ID: ${chunk.chunk_id}]\n`;
+      const sepCost = formattedPassages.length > 0 ? PASSAGE_SEPARATOR.length : 0;
+      const remainingTotalBudget = maxContextChars - totalChars - sepCost - header.length;
+
+      if (formattedPassages.length > 0 && remainingTotalBudget < 160) {
         break;
       }
+
+      const maxAllowedText = Math.min(
+        perPassageTextCap,
+        Math.max(120, remainingTotalBudget)
+      );
+      const boundedText = trimSentenceBoundary(item.promptText, maxAllowedText);
+      const entry = `${header}${boundedText}`;
+
+      if (formattedPassages.length > 0 && totalChars + sepCost + entry.length > maxContextChars) {
+        break;
+      }
+
       formattedPassages.push(entry);
-      included.push(item);
-      totalChars += entry.length;
+      included.push({ chunk, promptText: boundedText });
+      totalChars += sepCost + entry.length;
     }
-    contextBlock = formattedPassages.join("\n\n---\n\n");
+    contextBlock = formattedPassages.join(PASSAGE_SEPARATOR);
   }
 
   const promptPreview = `<retrieved_context>\n${contextBlock}\n</retrieved_context>\n\nUser Question: ${question}`;

@@ -304,7 +304,7 @@ class RagEngine {
     const embeddingModel = getActiveEmbeddingModel();
     const embedBudgetOptions =
       options.deadlineMs !== undefined
-        ? { deadlineMs: Math.min(options.deadlineMs, Date.now() + 12_000) }
+        ? { deadlineMs: Math.min(options.deadlineMs, Date.now() + 15_000) }
         : undefined;
 
     const [, queryEmbedding] = await Promise.all([
