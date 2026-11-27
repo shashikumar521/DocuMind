@@ -1,6 +1,8 @@
 import crypto from "crypto";
 import {
   CF_COMPARE_ATTEMPT_TIMEOUT_MS,
+  CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION,
+  CF_COMPARE_RAG_SYSTEM_INSTRUCTION,
   CF_COMPARE_TOTAL_BUDGET_MS,
   checkCloudflareConnectivity,
   classifyCloudflareError,
@@ -9,7 +11,7 @@ import {
   formatCloudflareError,
   generateCloudflareEmbeddings,
   generateCloudflareRagAnswer,
-  generateCloudflareWithoutRagAnswer,
+  generateCloudflareWithoutRagAnswerDetailed,
   getCloudflareChatModel,
   getCloudflareEmbeddingModel,
   getCloudflareExpectedEmbeddingDimensions,
@@ -20,7 +22,9 @@ import { buildOptimizedRagPrompt, RagPromptOptions, redactSecrets, RetrievedChun
 export type AiProvider = "cloudflare";
 
 // Keep end-to-end execution cleanly within Vercel's 60s maxDuration across retrieval + inference.
-export const VERCEL_REQUEST_DEADLINE_MS = 52_000;
+export const VERCEL_REQUEST_DEADLINE_MS = 54_000;
+
+export { CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION, CF_COMPARE_RAG_SYSTEM_INSTRUCTION };
 
 export interface AiGenerationOptions {
   totalBudgetMs?: number;
@@ -34,6 +38,8 @@ export interface AiGenerationOptions {
   compactMaxTokens?: number;
   promptOptions?: RagPromptOptions;
   compactPromptOptions?: RagPromptOptions;
+  systemInstruction?: string;
+  promptTag?: string;
   signal?: AbortSignal;
 }
 
@@ -42,12 +48,16 @@ export interface AiRagResult {
   promptPreview: string;
   provider: AiProvider;
   model: string;
+  finishReason: string | null;
+  truncated: boolean;
 }
 
 export interface AiNoRagResult {
   answer: string;
   provider: AiProvider;
   model: string;
+  finishReason: string | null;
+  truncated: boolean;
 }
 
 export interface AiTelemetryEvent {
@@ -209,7 +219,7 @@ export async function generateWithoutRagAnswerWithMeta(
   const providerStart = Date.now();
 
   try {
-    const answer = await generateCloudflareWithoutRagAnswer(question, options);
+    const completion = await generateCloudflareWithoutRagAnswerDetailed(question, options);
     emitAiTelemetry({
       event: "ai_request",
       requestId,
@@ -223,9 +233,11 @@ export async function generateWithoutRagAnswerWithMeta(
       finalStatus: "success",
     });
     return {
-      answer,
+      answer: completion.answer,
       provider: "cloudflare",
       model,
+      finishReason: completion.finishReason,
+      truncated: completion.truncated,
     };
   } catch (err: unknown) {
     const formatted = formatCloudflareError(err);

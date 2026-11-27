@@ -3,6 +3,8 @@ import "dotenv/config";
 import express, { Express, NextFunction, Request, Response } from "express";
 import multer from "multer";
 import {
+  CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION,
+  CF_COMPARE_RAG_SYSTEM_INSTRUCTION,
   checkAiProviderConnectivity,
   formatAiError,
   generateRagAnswer,
@@ -13,6 +15,7 @@ import {
   getCompareAttemptTimeoutMs,
   getCompareTotalBudgetMs,
   isAiConfigured,
+  RetrievedChunkRef,
   VERCEL_REQUEST_DEADLINE_MS,
 } from "./aiClient.js";
 import {
@@ -373,44 +376,46 @@ export function createApiApp(): Express {
     const effectiveTopK = Math.min(requestedTopK, COMPARE_MAX_TOP_K);
 
     const requestId = crypto.randomUUID();
-    const deadlineMs = Date.now() + VERCEL_REQUEST_DEADLINE_MS;
-    const compareAbort = new AbortController();
+    const requestStartedAt = Date.now();
+    const totalBudgetMs = getCompareTotalBudgetMs();
+    const attemptTimeoutMs = getCompareAttemptTimeoutMs();
+    const compareDeadlineMs = Math.min(
+      requestStartedAt + VERCEL_REQUEST_DEADLINE_MS,
+      requestStartedAt + totalBudgetMs
+    );
+    const activeProvider = getActiveAiProvider();
+    const activeChatModel = getActiveChatModel();
+    let retrievedChunks: RetrievedChunkRef[] = [];
 
     try {
-      const totalBudgetMs = getCompareTotalBudgetMs();
-      const attemptTimeoutMs = getCompareAttemptTimeoutMs();
       const retrievalStart = Date.now();
 
-      // Start the ungrounded Without-RAG call immediately alongside retrieval so it does not
-      // sit idle behind query embedding + pgvector lookup inside Vercel's 60s limit.
+      // Start the ungrounded Without-RAG call concurrently with retrieval without cross-canceling
+      // the sibling branch if one side fails, enabling safe partial-branch recovery.
       const withoutRagPromise = generateWithoutRagAnswerWithMeta(question, {
         totalBudgetMs,
         attemptTimeoutMs,
-        deadlineMs,
+        deadlineMs: compareDeadlineMs,
         requestId,
         endpoint: req.path,
         maxTokens: COMPARE_NO_RAG_MAX_OUTPUT_TOKENS,
         compactMaxTokens: COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
-        signal: compareAbort.signal,
-      }).catch((err: unknown) => {
-        if (!compareAbort.signal.aborted) {
-          compareAbort.abort(err);
-        }
-        throw err;
+        systemInstruction: CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION,
+        promptTag: "compare-no-rag",
       });
 
       const withRagChainPromise = ragEngine
         .retrieveChunks(question, effectiveTopK, documentIds, {
-          deadlineMs,
+          deadlineMs: compareDeadlineMs,
           requestId,
-          signal: compareAbort.signal,
         })
         .then(async (chunks) => {
+          retrievedChunks = chunks;
           const retrievalDurationMs = Date.now() - retrievalStart;
           const withRagResult = await generateRagAnswer(question, chunks, {
             totalBudgetMs,
             attemptTimeoutMs,
-            deadlineMs,
+            deadlineMs: compareDeadlineMs,
             requestId,
             endpoint: req.path,
             retrievalDurationMs,
@@ -426,46 +431,116 @@ export function createApiApp(): Express {
               maxChunkChars: COMPARE_COMPACT_MAX_CHUNK_CHARS,
               maxContextChars: COMPARE_COMPACT_MAX_CONTEXT_CHARS,
             },
-            signal: compareAbort.signal,
+            systemInstruction: CF_COMPARE_RAG_SYSTEM_INSTRUCTION,
+            promptTag: "compare-rag",
           });
           return { chunks, withRagResult };
-        })
-        .catch((err: unknown) => {
-          if (!compareAbort.signal.aborted) {
-            compareAbort.abort(err);
-          }
-          throw err;
         });
 
-      const [withoutRagResult, { chunks, withRagResult }] = await Promise.all([
+      const [withoutSettled, withSettled] = await Promise.allSettled([
         withoutRagPromise,
         withRagChainPromise,
       ]);
+
+      if (withoutSettled.status === "rejected" && withSettled.status === "rejected") {
+        const withoutFormatted = formatRouteError(withoutSettled.reason);
+        const withFormatted = formatRouteError(withSettled.reason);
+        const primaryError =
+          withFormatted.status !== 504 ? withFormatted : withoutFormatted;
+        res.status(primaryError.status).json({ detail: primaryError.message });
+        return;
+      }
+
+      if (withoutSettled.status === "rejected") {
+        const errInfo = formatRouteError(withoutSettled.reason);
+        if (errInfo.status === 403 || errInfo.status === 503) {
+          res.status(errInfo.status).json({ detail: errInfo.message });
+          return;
+        }
+      }
+
+      if (withSettled.status === "rejected") {
+        const errInfo = formatRouteError(withSettled.reason);
+        if (errInfo.status === 403 || errInfo.status === 503) {
+          res.status(errInfo.status).json({ detail: errInfo.message });
+          return;
+        }
+      }
+
+      const withoutBranch =
+        withoutSettled.status === "fulfilled"
+          ? {
+              status: (withoutSettled.value.truncated ? "truncated" : "completed") as
+                | "completed"
+                | "truncated",
+              answer: withoutSettled.value.answer,
+              ai_provider: withoutSettled.value.provider,
+              model: withoutSettled.value.model,
+              finish_reason: withoutSettled.value.finishReason,
+              truncated: withoutSettled.value.truncated,
+            }
+          : (() => {
+              const formatted = formatRouteError(withoutSettled.reason);
+              return {
+                status: "error" as const,
+                answer: "",
+                ai_provider: activeProvider,
+                model: activeChatModel,
+                finish_reason: null,
+                truncated: false,
+                error: formatted.message,
+                timed_out: formatted.status === 504,
+              };
+            })();
+
+      const withBranch =
+        withSettled.status === "fulfilled"
+          ? {
+              status: (withSettled.value.withRagResult.truncated ? "truncated" : "completed") as
+                | "completed"
+                | "truncated",
+              answer: withSettled.value.withRagResult.answer,
+              ai_provider: withSettled.value.withRagResult.provider,
+              model: withSettled.value.withRagResult.model,
+              finish_reason: withSettled.value.withRagResult.finishReason,
+              truncated: withSettled.value.withRagResult.truncated,
+              sources: withSettled.value.chunks,
+              prompt_preview: withSettled.value.withRagResult.promptPreview,
+            }
+          : (() => {
+              const formatted = formatRouteError(withSettled.reason);
+              return {
+                status: "error" as const,
+                answer: "",
+                ai_provider: activeProvider,
+                model: activeChatModel,
+                finish_reason: null,
+                truncated: false,
+                error: formatted.message,
+                timed_out: formatted.status === 504,
+                sources: retrievedChunks,
+                prompt_preview: "",
+              };
+            })();
+
+      const hasBranchError =
+        withoutBranch.status === "error" || withBranch.status === "error";
+      const hasTruncation =
+        withoutBranch.status === "truncated" || withBranch.status === "truncated";
 
       res.json({
         request_id: requestId,
         question,
         document_ids: documentIds ?? [],
         top_k: effectiveTopK,
-        ai_provider: withRagResult.provider,
-        model: withRagResult.model,
-        without_rag: {
-          answer: withoutRagResult.answer,
-          ai_provider: withoutRagResult.provider,
-          model: withoutRagResult.model,
-        },
-        with_rag: {
-          answer: withRagResult.answer,
-          ai_provider: withRagResult.provider,
-          model: withRagResult.model,
-          sources: chunks,
-          prompt_preview: withRagResult.promptPreview,
-        },
+        ai_provider: activeProvider,
+        model: activeChatModel,
+        partial: hasBranchError,
+        status: hasBranchError || hasTruncation ? "partial" : "completed",
+        without_rag: withoutBranch,
+        with_rag: withBranch,
       });
     } catch (err: unknown) {
-      if (!compareAbort.signal.aborted) {
-        compareAbort.abort(err);
-      }
       const formatted = formatRouteError(err);
       res.status(formatted.status).json({ detail: formatted.message });
     }
