@@ -16,8 +16,14 @@ import {
   getActiveChatModel,
   getActiveEmbeddingModel,
   getExpectedEmbeddingDimensions,
+  VERCEL_REQUEST_DEADLINE_MS,
 } from "../server/aiClient.js";
 import {
+  CF_COMPARE_TOTAL_BUDGET_MS,
+  CF_GENERATE_TIMEOUT_MS,
+  CF_GENERATE_TOTAL_BUDGET_MS,
+  CF_QUERY_EMBED_TIMEOUT_MS,
+  CF_QUERY_EMBED_TOTAL_BUDGET_MS,
   clearCloudflareCachesForTest,
   CLOUDFLARE_CHAT_MAX_TOKENS,
   CLOUDFLARE_CHAT_MODEL,
@@ -31,6 +37,8 @@ import {
 import { chunkPageText } from "../server/ragEngine.js";
 import {
   buildOptimizedRagPrompt,
+  RAG_COMPACT_MAX_CONTEXT_CHARS,
+  RAG_COMPACT_MAX_OUTPUT_TOKENS,
   RAG_MAX_CONTEXT_CHARS,
   RAG_MAX_OUTPUT_TOKENS,
 } from "../server/ragPrompt.js";
@@ -42,6 +50,7 @@ import {
   LocalDevJsonStorage,
   PostgresBlobStorage,
   sanitizeDatabaseErrorMessage,
+  setStorageAdapterForTest,
   StorageConfigError,
   StoredChunk,
 } from "../server/storage.js";
@@ -230,6 +239,9 @@ function createInMemoryPostgresTestPool(options: {
     if (normalized.includes("embedding_cf <=>")) {
       const embeddingModel = String(params[0] ?? "@cf/baai/bge-m3");
       const expectedDims = Number(params[1] ?? 1024);
+      const anyMatch = normalized.match(/document_id = ANY\(\$(\d+)::text\[\]\)/);
+      const docFilter = anyMatch ? (params[Number(anyMatch[1]) - 1] as string[]) : null;
+      const docFilterSet = Array.isArray(docFilter) && docFilter.length > 0 ? new Set(docFilter) : null;
       const queryVec = JSON.parse(String(params[params.length - 2])) as number[];
       const topK = Number(params[params.length - 1] ?? 3);
 
@@ -237,6 +249,7 @@ function createInMemoryPostgresTestPool(options: {
         .filter((r) => {
           if (r.embedding_cf === null) return false;
           if (r.embedding_cf_model !== embeddingModel) return false;
+          if (docFilterSet && !docFilterSet.has(r.document_id)) return false;
           const vec = JSON.parse(r.embedding_cf) as number[];
           return vec.length === expectedDims;
         })
@@ -757,8 +770,10 @@ async function runCloudflareOnlyCoreTests() {
     assert.equal(quotaAttempts, 1, "Daily neuron exhaustion must fail fast");
 
     clearCloudflareCachesForTest();
+    let persistentTimeoutCalls = 0;
     setCloudflareFetchForTest(async () => {
-      const timeoutErr = new Error("Cloudflare Workers AI request timed out after 15000ms.");
+      persistentTimeoutCalls += 1;
+      const timeoutErr = new Error("Cloudflare Workers AI request timed out.");
       timeoutErr.name = "AbortError";
       throw timeoutErr;
     });
@@ -766,6 +781,100 @@ async function runCloudflareOnlyCoreTests() {
       () => generateCloudflareWithoutRagAnswer("timeout test"),
       (err) => formatAiError(err).status === 504
     );
+    assert.equal(persistentTimeoutCalls, 2);
+
+    // 7b. Sensible timeout budgets + compact-context retry on RAG timeout + embedding timeout recovery
+    assert.ok(CF_GENERATE_TIMEOUT_MS >= 25_000, "Single generation attempt timeout must allow >=25s for Llama 4 Scout");
+    assert.ok(CF_GENERATE_TOTAL_BUDGET_MS <= VERCEL_REQUEST_DEADLINE_MS);
+    assert.ok(CF_COMPARE_TOTAL_BUDGET_MS <= VERCEL_REQUEST_DEADLINE_MS);
+    assert.ok(VERCEL_REQUEST_DEADLINE_MS < 60_000);
+    assert.ok(CF_QUERY_EMBED_TOTAL_BUDGET_MS > CF_QUERY_EMBED_TIMEOUT_MS);
+
+    // Higher topK (5 bulky chunks) distributes context budget without starving cited sources
+    const fiveBulkyChunks = Array.from({ length: 5 }, (_, idx) => ({
+      rank: idx + 1,
+      chunk_id: `bulk_p${idx + 1}_c0`,
+      document_id: `doc-${idx + 1}`,
+      filename: `Doc_${idx + 1}.pdf`,
+      page_number: idx + 1,
+      text: `Section ${idx + 1} policy requires multi-factor verification and quarterly audits. `.repeat(35),
+      similarity: 0.95 - idx * 0.02,
+      distance: 0.05 + idx * 0.02,
+    }));
+    const multiTopKPrompt = buildOptimizedRagPrompt("List policies across documents", fiveBulkyChunks);
+    assert.ok(multiTopKPrompt.contextChars <= RAG_MAX_CONTEXT_CHARS);
+    assert.ok(multiTopKPrompt.deduplicatedChunksCount >= 4, "Should represent multiple top-K documents fairly");
+    for (let i = 1; i <= multiTopKPrompt.deduplicatedChunksCount; i++) {
+      assert.ok(multiTopKPrompt.promptPreview.includes(`File: Doc_${i}.pdf | Page: ${i}`));
+    }
+
+    // Attempt 1 RAG timeout triggers 1 compact-context fallback attempt and aligns promptPreview
+    clearCloudflareCachesForTest();
+    const ragRetryPayloads: Array<{ max_tokens: number; prompt: string }> = [];
+    setCloudflareFetchForTest(async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        max_tokens: number;
+        messages: Array<{ role: string; content: string }>;
+      };
+      ragRetryPayloads.push({
+        max_tokens: body.max_tokens,
+        prompt: body.messages[1].content,
+      });
+      if (ragRetryPayloads.length === 1) {
+        const err = new Error("Cloudflare Workers AI request timed out after 32000ms.");
+        err.name = "AbortError";
+        throw err;
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "Multi-factor verification is required [Doc_1.pdf, p. 1].",
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+
+    const compactRecovered = await generateCloudflareRagAnswer("What is required?", fiveBulkyChunks);
+    assert.equal(ragRetryPayloads.length, 2);
+    assert.equal(ragRetryPayloads[0].max_tokens, RAG_MAX_OUTPUT_TOKENS);
+    assert.equal(ragRetryPayloads[1].max_tokens, RAG_COMPACT_MAX_OUTPUT_TOKENS);
+    assert.ok(ragRetryPayloads[1].prompt.length < ragRetryPayloads[0].prompt.length);
+    const compactContextMatch = compactRecovered.promptPreview.match(
+      /<retrieved_context>\n([\s\S]*)\n<\/retrieved_context>/
+    );
+    assert.ok(compactContextMatch && compactContextMatch[1].length <= RAG_COMPACT_MAX_CONTEXT_CHARS);
+    assert.ok(compactRecovered.promptPreview.includes("File: Doc_1.pdf | Page: 1"));
+    assert.ok(compactRecovered.promptPreview.includes("File: Doc_2.pdf | Page: 2"));
+    assert.equal(
+      compactRecovered.promptPreview,
+      ragRetryPayloads[1].prompt,
+      "Pipeline Inspector promptPreview must match the compact prompt actually sent"
+    );
+    assert.ok(compactRecovered.answer.includes("[Doc_1.pdf, p. 1]"));
+
+    // Query embedding recovers cleanly from single timeout
+    clearCloudflareCachesForTest();
+    let embedTimeoutCalls = 0;
+    setCloudflareFetchForTest(async () => {
+      embedTimeoutCalls += 1;
+      if (embedTimeoutCalls === 1) {
+        const err = new Error("Cloudflare Workers AI request timed out after 9000ms.");
+        err.name = "AbortError";
+        throw err;
+      }
+      return new Response(
+        JSON.stringify({ data: [{ index: 0, embedding: unitVec(1024, 5) }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    const recoveredVec = await embedQuery("Timeout recovery query");
+    assert.equal(embedTimeoutCalls, 2);
+    assert.equal(recoveredVec.length, 1024);
 
     // Expired deadline fails fast with zero network calls
     clearCloudflareCachesForTest();
@@ -1907,11 +2016,307 @@ async function runEndToEndMigrationAndBackfillTests() {
   );
 }
 
+async function runDocumentIsolationAndInspectorTraceTests() {
+  const prevEnv = {
+    CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
+  };
+
+  // Weighted 1024d vectors where query=[1,0,...], SE doc=[0.99,0.14,...] (higher global match),
+  // and AI doc=[0.80,0.60,...] (lower global match, but must win 100% when scoped to AI doc).
+  const queryVec = unitVec(1024, 0);
+  const seVec = new Array<number>(1024).fill(0);
+  seVec[0] = 0.99;
+  seVec[1] = 0.14;
+  const aiVec = new Array<number>(1024).fill(0);
+  aiVec[0] = 0.8;
+  aiVec[1] = 0.6;
+
+  const aiDocId = "doc-ai-assignment";
+  const seDocId = "doc-se-assignment";
+  const aiFilename = "AI_Assignment.pdf";
+  const seFilename = "2026_11_23_11_23_16_275.pdf";
+
+  // 18. PostgreSQL vector query applies document_id = ANY(...) filtering strictly
+  {
+    const previewUrl = "postgresql://user:supersecret@ep-preview-branch.neon.tech/documind_preview";
+    const testDb = createInMemoryPostgresTestPool({
+      databaseName: "documind_preview",
+      initialChunks: [
+        {
+          chunk_id: `${aiDocId}_p1_c0`,
+          document_id: aiDocId,
+          filename: aiFilename,
+          page_number: 1,
+          text: "AI Planning with STRIPS operators, CSP backtracking, BFS, and DFS search.",
+          token_count: 11,
+          embedding: null,
+          embedding_model: null,
+          embedding_cf: JSON.stringify(aiVec),
+          embedding_cf_model: "@cf/baai/bge-m3",
+        },
+        {
+          chunk_id: `${seDocId}_p1_c0`,
+          document_id: seDocId,
+          filename: seFilename,
+          page_number: 1,
+          text: "Software Engineering Assignment: SDLC phases, Waterfall vs Agile, and UML diagrams.",
+          token_count: 12,
+          embedding: null,
+          embedding_model: null,
+          embedding_cf: JSON.stringify(seVec),
+          embedding_cf_model: "@cf/baai/bge-m3",
+        },
+      ],
+    });
+
+    const pgStorage = new PostgresBlobStorage(previewUrl, testDb.pool);
+
+    // Scoped strictly to AI_Assignment.pdf
+    const scopedAiHits = await pgStorage.searchSimilarChunks(queryVec, 3, [aiDocId], {
+      provider: "cloudflare",
+      embeddingModel: "@cf/baai/bge-m3",
+    });
+    assert.equal(scopedAiHits.length, 1);
+    assert.equal(scopedAiHits[0].document_id, aiDocId);
+    assert.equal(scopedAiHits[0].filename, aiFilename);
+    assert.ok(
+      testDb.executedQueries.some((q) => q.includes("document_id = ANY(")),
+      "PostgreSQL similarity search must filter by document_id = ANY(...) when documentIds are provided"
+    );
+
+    // Multi-document retrieval (explicit both IDs & undefined) returns both, ranked by similarity
+    const multiHits = await pgStorage.searchSimilarChunks(queryVec, 3, [aiDocId, seDocId], {
+      provider: "cloudflare",
+      embeddingModel: "@cf/baai/bge-m3",
+    });
+    assert.equal(multiHits.length, 2);
+    assert.equal(multiHits[0].document_id, seDocId);
+    assert.equal(multiHits[1].document_id, aiDocId);
+
+    const globalHits = await pgStorage.searchSimilarChunks(queryVec, 3, undefined, {
+      provider: "cloudflare",
+      embeddingModel: "@cf/baai/bge-m3",
+    });
+    assert.equal(globalHits.length, 2);
+    assert.equal(globalHits[0].document_id, seDocId);
+  }
+
+  // 19. End-to-end HTTP regression: two PDFs (AI vs Software Engineering), document isolation,
+  //     exact request_id + prompt trace association, and multi-doc / Compare preservation.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "documind-isolation-test-"));
+  try {
+    process.env.CLOUDFLARE_ACCOUNT_ID = "cf-iso-account";
+    process.env.CLOUDFLARE_API_TOKEN = "cf-iso-token";
+    clearCloudflareCachesForTest();
+
+    const store = new LocalDevJsonStorage(path.join(tmpDir, "store.json"));
+    await store.insertDocument({
+      id: aiDocId,
+      filename: aiFilename,
+      size_bytes: 2048,
+      pages: 2,
+      chunks_count: 1,
+      status: "Indexed Successfully",
+      progress: 100,
+      error_message: null,
+      sha256: "sha-ai-assignment",
+      uploaded_at: new Date().toISOString(),
+    });
+    await store.insertDocument({
+      id: seDocId,
+      filename: seFilename,
+      size_bytes: 2048,
+      pages: 2,
+      chunks_count: 1,
+      status: "Indexed Successfully",
+      progress: 100,
+      error_message: null,
+      sha256: "sha-se-assignment",
+      uploaded_at: new Date().toISOString(),
+    });
+    await store.insertChunks([
+      {
+        chunk_id: `${aiDocId}_p1_c0`,
+        document_id: aiDocId,
+        filename: aiFilename,
+        page_number: 1,
+        text: "This AI assignment covers AI planning, STRIPS operators, Constraint Satisfaction Problems (CSPs), BFS, and DFS.",
+        token_count: 17,
+        embedding: null,
+        embedding_model: null,
+        embedding_cf: aiVec,
+        embedding_cf_model: "@cf/baai/bge-m3",
+      },
+      {
+        chunk_id: `${seDocId}_p1_c0`,
+        document_id: seDocId,
+        filename: seFilename,
+        page_number: 1,
+        text: "This Software Engineering assignment covers SDLC models, Agile sprints, requirements engineering, and UML class diagrams.",
+        token_count: 17,
+        embedding: null,
+        embedding_model: null,
+        embedding_cf: seVec,
+        embedding_cf_model: "@cf/baai/bge-m3",
+      },
+    ]);
+    setStorageAdapterForTest(store);
+
+    setCloudflareFetchForTest(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/ai/v1/embeddings")) {
+        return new Response(
+          JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      const userPrompt = body.messages[1].content;
+      const content = userPrompt.includes(aiFilename)
+        ? `The document covers AI planning, STRIPS, CSPs, BFS, and DFS [${aiFilename}, p. 1].`
+        : userPrompt.includes(seFilename)
+        ? `The document covers SDLC, Agile, and UML [${seFilename}, p. 1].`
+        : "General answer without document context.";
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content } }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+
+    const expressApp = createApiApp();
+    const server = http.createServer(expressApp);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    try {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        throw new Error("Failed to bind ephemeral isolation test port");
+      }
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const realFetch = globalThis.fetch;
+
+      const question = "What is the main topic of this document?";
+
+      // Ask scoped to AI_Assignment.pdf
+      const chatResp = await realFetch(`${baseUrl}/api/chat/ask`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          document_ids: [aiDocId],
+          top_k: 3,
+        }),
+      });
+      assert.equal(chatResp.status, 200);
+      const chatBody = (await chatResp.json()) as {
+        request_id: string;
+        question: string;
+        document_ids: string[];
+        answer: string;
+        sources: Array<{ chunk_id: string; document_id: string; filename: string }>;
+        prompt_preview: string;
+      };
+      assert.ok(chatBody.request_id && chatBody.request_id.length > 0);
+      assert.deepEqual(chatBody.document_ids, [aiDocId]);
+      assert.equal(chatBody.sources.length, 1);
+      assert.equal(chatBody.sources[0].document_id, aiDocId);
+      assert.equal(chatBody.sources[0].filename, aiFilename);
+      assert.ok(chatBody.prompt_preview.includes(aiFilename));
+      assert.ok(!chatBody.prompt_preview.includes(seFilename));
+      assert.ok(chatBody.answer.includes("STRIPS"));
+
+      // Inspect scoped to AI_Assignment.pdf returns consistent chunks, request_id, and prompt
+      const scopedInspectResp = await realFetch(`${baseUrl}/api/retrieval/inspect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          document_ids: [aiDocId],
+          top_k: 3,
+        }),
+      });
+      assert.equal(scopedInspectResp.status, 200);
+      const scopedInspect = (await scopedInspectResp.json()) as {
+        request_id: string;
+        document_ids: string[];
+        chunks: Array<{ chunk_id: string; document_id: string; filename: string; similarity: number }>;
+        prompt_preview: string;
+        answer: string;
+      };
+      assert.ok(scopedInspect.request_id && scopedInspect.request_id.length > 0);
+      assert.deepEqual(scopedInspect.document_ids, [aiDocId]);
+      assert.equal(scopedInspect.chunks.length, 1);
+      assert.equal(scopedInspect.chunks[0].document_id, aiDocId);
+      assert.equal(scopedInspect.chunks[0].filename, aiFilename);
+      assert.ok(scopedInspect.prompt_preview.includes(aiFilename));
+      assert.ok(!scopedInspect.prompt_preview.includes(seFilename));
+
+      // Multi-document retrieval & Compare Documents remain preserved when unscoped or multi-scoped
+      const multiInspectResp = await realFetch(`${baseUrl}/api/retrieval/inspect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          top_k: 3,
+        }),
+      });
+      assert.equal(multiInspectResp.status, 200);
+      const multiInspect = (await multiInspectResp.json()) as {
+        document_ids: string[];
+        chunks: Array<{ document_id: string; filename: string }>;
+      };
+      assert.deepEqual(multiInspect.document_ids, []);
+      assert.equal(multiInspect.chunks.length, 2);
+      assert.equal(multiInspect.chunks[0].filename, seFilename);
+
+      const compareResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          document_ids: [aiDocId, seDocId],
+          top_k: 3,
+        }),
+      });
+      assert.equal(compareResp.status, 200);
+      const compareBody = (await compareResp.json()) as {
+        request_id: string;
+        document_ids: string[];
+        with_rag: { sources: Array<{ document_id: string }> };
+      };
+      assert.ok(compareBody.request_id);
+      assert.deepEqual(compareBody.document_ids, [aiDocId, seDocId]);
+      assert.equal(compareBody.with_rag.sources.length, 2);
+
+      console.log(
+        "PASS: Document isolation, PostgreSQL document_id filtering, Inspector trace association, and multi-doc/compare tests passed (2/2)."
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
+  } finally {
+    setStorageAdapterForTest(null);
+    setCloudflareFetchForTest(null);
+    clearCloudflareCachesForTest();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const [key, val] of Object.entries(prevEnv)) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  }
+}
+
 async function main() {
   await runCloudflareOnlyCoreTests();
   await runStorageRetrievalAndSafetyTests();
   await runEndToEndMigrationAndBackfillTests();
   await runHttpApiAndHealthTests();
+  await runDocumentIsolationAndInspectorTraceTests();
   await runOptionalLiveCloudflareSmokeTest();
 }
 
