@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   FileText,
   GitCompareArrows,
@@ -44,12 +45,20 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
     if (!q || loading) return;
     setLoading(true);
     setError(null);
+    setResult(null);
     try {
       const data = await compareRagQuestion({
         question: q,
         topK: preferences.topK,
       });
       setResult(data);
+      if (data.partial) {
+        pushToast({
+          kind: "info",
+          title: "Partial comparison result",
+          description: "One branch completed while the other failed or timed out.",
+        });
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to run RAG comparison.";
       setError(msg);
@@ -63,6 +72,22 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
     result?.model || health?.chat_model || "@cf/meta/llama-4-scout-17b-16e-instruct";
   const withoutRagModel = result?.without_rag?.model || activeModel;
   const withRagModel = result?.with_rag?.model || activeModel;
+  const withoutRagStatus = result
+    ? result.without_rag.status ??
+      (result.without_rag.error
+        ? "error"
+        : result.without_rag.truncated
+        ? "truncated"
+        : "completed")
+    : null;
+  const withRagStatus = result
+    ? result.with_rag.status ??
+      (result.with_rag.error
+        ? "error"
+        : result.with_rag.truncated
+        ? "truncated"
+        : "completed")
+    : null;
   const effectiveTopK = result?.top_k ?? Math.min(preferences.topK, 3);
   const providerLabel = "Cloudflare Workers AI";
 
@@ -116,6 +141,17 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
               <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
               <span>{error}</span>
             </div>
+          ) : result?.partial ? (
+            <div
+              role="status"
+              className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/35 text-amber-800 dark:text-amber-300 flex items-center gap-2.5 text-xs sm:text-sm"
+            >
+              <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <span>
+                Partial comparison completed: check individual panels below for branch status and any
+                errors.
+              </span>
+            </div>
           ) : (
             <p className="text-xs text-[var(--dm-text-muted)]">
               Both responses are generated live via{" "}
@@ -143,7 +179,21 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
                   </p>
                 </div>
               </div>
-              <span className="font-mono text-xs text-[var(--dm-text-muted)]">Ungrounded</span>
+              <span
+                className={`font-mono text-xs ${
+                  withoutRagStatus === "error"
+                    ? "text-red-700 dark:text-red-400"
+                    : withoutRagStatus === "truncated"
+                    ? "text-amber-700 dark:text-amber-300"
+                    : "text-[var(--dm-text-muted)]"
+                }`}
+              >
+                {withoutRagStatus === "error"
+                  ? "Failed"
+                  : withoutRagStatus === "truncated"
+                  ? "Truncated"
+                  : "Ungrounded"}
+              </span>
             </header>
 
             <ul className="space-y-2 text-xs text-[var(--dm-text-muted)]">
@@ -172,7 +222,34 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
                   <div className="h-4 w-2/3 rounded bg-slate-900/5 dark:bg-white/5 animate-pulse" />
                 </div>
               ) : result ? (
-                <MarkdownRenderer content={result.without_rag.answer} />
+                withoutRagStatus === "error" ? (
+                  <div
+                    role="alert"
+                    className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300 flex items-start gap-2 text-xs leading-relaxed"
+                  >
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+                    <span>
+                      {result.without_rag.error ||
+                        "Without-RAG generation failed before completing."}
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    {withoutRagStatus === "truncated" && (
+                      <div
+                        role="status"
+                        className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300 flex items-center gap-2 text-xs"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span>
+                          Incomplete output: response reached the token limit (finish_reason=
+                          {result.without_rag.finish_reason || "length"}).
+                        </span>
+                      </div>
+                    )}
+                    <MarkdownRenderer content={result.without_rag.answer} />
+                  </>
+                )
               ) : (
                 <p className="text-sm text-[var(--dm-text-muted)] leading-relaxed">
                   Submit a question above to observe how the model responds without access to your
@@ -198,7 +275,21 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
                   </p>
                 </div>
               </div>
-              <span className="font-mono text-xs text-emerald-700 dark:text-emerald-400">Grounded</span>
+              <span
+                className={`font-mono text-xs ${
+                  withRagStatus === "error"
+                    ? "text-red-700 dark:text-red-400"
+                    : withRagStatus === "truncated"
+                    ? "text-amber-700 dark:text-amber-300"
+                    : "text-emerald-700 dark:text-emerald-400"
+                }`}
+              >
+                {withRagStatus === "error"
+                  ? "Failed"
+                  : withRagStatus === "truncated"
+                  ? "Truncated"
+                  : "Grounded"}
+              </span>
             </header>
 
             <ul className="space-y-2 text-xs text-[var(--dm-text-secondary)]">
@@ -228,10 +319,37 @@ export const RAGComparison: React.FC<RAGComparisonProps> = ({
                 </div>
               ) : result ? (
                 <>
-                  <MarkdownRenderer
-                    content={result.with_rag.answer}
-                    sources={result.with_rag.sources}
-                  />
+                  {withRagStatus === "error" ? (
+                    <div
+                      role="alert"
+                      className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300 flex items-start gap-2 text-xs leading-relaxed"
+                    >
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+                      <span>
+                        {result.with_rag.error ||
+                          "With-RAG answer generation failed before completing."}
+                      </span>
+                    </div>
+                  ) : (
+                    <>
+                      {withRagStatus === "truncated" && (
+                        <div
+                          role="status"
+                          className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300 flex items-center gap-2 text-xs"
+                        >
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                          <span>
+                            Incomplete output: response reached the token limit (finish_reason=
+                            {result.with_rag.finish_reason || "length"}).
+                          </span>
+                        </div>
+                      )}
+                      <MarkdownRenderer
+                        content={result.with_rag.answer}
+                        sources={result.with_rag.sources}
+                      />
+                    </>
+                  )}
 
                   <div className="pt-3 border-t border-[var(--dm-border)] space-y-2">
                     <div className="flex items-center justify-between text-xs">
