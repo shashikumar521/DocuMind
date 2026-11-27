@@ -3,9 +3,11 @@ import "dotenv/config";
 import express, { Express, NextFunction, Request, Response } from "express";
 import multer from "multer";
 import {
+  AiBranch,
   CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION,
   CF_COMPARE_RAG_SYSTEM_INSTRUCTION,
   checkAiProviderConnectivity,
+  CloudflareConfigError,
   formatAiError,
   generateRagAnswer,
   generateWithoutRagAnswerWithMeta,
@@ -29,6 +31,7 @@ import {
   COMPARE_COMPACT_MAX_CONTEXT_CHARS,
   COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
   COMPARE_MAX_TOP_K,
+  COMPARE_NO_RAG_COMPACT_MAX_OUTPUT_TOKENS,
   COMPARE_NO_RAG_MAX_OUTPUT_TOKENS,
   COMPARE_RAG_MAX_CHUNK_CHARS,
   COMPARE_RAG_MAX_CHUNKS,
@@ -50,11 +53,14 @@ const upload = multer({
   },
 });
 
-function formatRouteError(err: unknown): { status: number; message: string } {
+function formatRouteError(
+  err: unknown,
+  options: { branch?: AiBranch } = {}
+): { status: number; message: string } {
   if (err instanceof StorageConfigError) {
     return { status: err.statusCode, message: sanitizeDatabaseErrorMessage(err.message) };
   }
-  const formatted = formatAiError(err);
+  const formatted = formatAiError(err, options);
   return {
     status: formatted.status,
     message: sanitizeDatabaseErrorMessage(formatted.message),
@@ -337,6 +343,7 @@ export function createApiApp(): Express {
         deadlineMs,
         requestId,
         endpoint: "/api/chat/ask",
+        branch: "chat",
         retrievalDurationMs,
       });
       await ragEngine.recordQuestion(question, ragResult.answer, chunks);
@@ -355,7 +362,7 @@ export function createApiApp(): Express {
         prompt_preview: ragResult.promptPreview,
       });
     } catch (err: unknown) {
-      const formatted = formatRouteError(err);
+      const formatted = formatRouteError(err, { branch: "chat" });
       res.status(formatted.status).json({ detail: formatted.message });
     }
   });
@@ -398,8 +405,9 @@ export function createApiApp(): Express {
         deadlineMs: compareDeadlineMs,
         requestId,
         endpoint: req.path,
+        branch: "without_rag",
         maxTokens: COMPARE_NO_RAG_MAX_OUTPUT_TOKENS,
-        compactMaxTokens: COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
+        compactMaxTokens: COMPARE_NO_RAG_COMPACT_MAX_OUTPUT_TOKENS,
         systemInstruction: CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION,
         promptTag: "compare-no-rag",
       });
@@ -418,6 +426,7 @@ export function createApiApp(): Express {
             deadlineMs: compareDeadlineMs,
             requestId,
             endpoint: req.path,
+            branch: "with_rag",
             retrievalDurationMs,
             maxTokens: COMPARE_RAG_MAX_OUTPUT_TOKENS,
             compactMaxTokens: COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
@@ -443,8 +452,8 @@ export function createApiApp(): Express {
       ]);
 
       if (withoutSettled.status === "rejected" && withSettled.status === "rejected") {
-        const withoutFormatted = formatRouteError(withoutSettled.reason);
-        const withFormatted = formatRouteError(withSettled.reason);
+        const withoutFormatted = formatRouteError(withoutSettled.reason, { branch: "without_rag" });
+        const withFormatted = formatRouteError(withSettled.reason, { branch: "with_rag" });
         const primaryError =
           withFormatted.status !== 504 ? withFormatted : withoutFormatted;
         res.status(primaryError.status).json({ detail: primaryError.message });
@@ -452,16 +461,24 @@ export function createApiApp(): Express {
       }
 
       if (withoutSettled.status === "rejected") {
-        const errInfo = formatRouteError(withoutSettled.reason);
-        if (errInfo.status === 403 || errInfo.status === 503) {
+        const errInfo = formatRouteError(withoutSettled.reason, { branch: "without_rag" });
+        if (
+          errInfo.status === 403 ||
+          withoutSettled.reason instanceof StorageConfigError ||
+          withoutSettled.reason instanceof CloudflareConfigError
+        ) {
           res.status(errInfo.status).json({ detail: errInfo.message });
           return;
         }
       }
 
       if (withSettled.status === "rejected") {
-        const errInfo = formatRouteError(withSettled.reason);
-        if (errInfo.status === 403 || errInfo.status === 503) {
+        const errInfo = formatRouteError(withSettled.reason, { branch: "with_rag" });
+        if (
+          errInfo.status === 403 ||
+          withSettled.reason instanceof StorageConfigError ||
+          withSettled.reason instanceof CloudflareConfigError
+        ) {
           res.status(errInfo.status).json({ detail: errInfo.message });
           return;
         }
@@ -480,7 +497,7 @@ export function createApiApp(): Express {
               truncated: withoutSettled.value.truncated,
             }
           : (() => {
-              const formatted = formatRouteError(withoutSettled.reason);
+              const formatted = formatRouteError(withoutSettled.reason, { branch: "without_rag" });
               return {
                 status: "error" as const,
                 answer: "",
@@ -508,7 +525,7 @@ export function createApiApp(): Express {
               prompt_preview: withSettled.value.withRagResult.promptPreview,
             }
           : (() => {
-              const formatted = formatRouteError(withSettled.reason);
+              const formatted = formatRouteError(withSettled.reason, { branch: "with_rag" });
               return {
                 status: "error" as const,
                 answer: "",
@@ -581,6 +598,7 @@ export function createApiApp(): Express {
         deadlineMs,
         requestId,
         endpoint: "/api/retrieval/inspect",
+        branch: "inspect",
         retrievalDurationMs,
       });
       res.json({
@@ -598,7 +616,7 @@ export function createApiApp(): Express {
         top_k: topK,
       });
     } catch (err: unknown) {
-      const formatted = formatRouteError(err);
+      const formatted = formatRouteError(err, { branch: "inspect" });
       res.status(formatted.status).json({ detail: formatted.message });
     }
   });

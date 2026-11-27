@@ -6,6 +6,8 @@ import {
   CF_COMPARE_TOTAL_BUDGET_MS,
   checkCloudflareConnectivity,
   classifyCloudflareError,
+  CloudflareBranch,
+  CloudflareConfigError,
   CloudflareConnectivityStatus,
   embedCloudflareQuery,
   formatCloudflareError,
@@ -20,6 +22,9 @@ import {
 import { buildOptimizedRagPrompt, RagPromptOptions, redactSecrets, RetrievedChunkRef } from "./ragPrompt.js";
 
 export type AiProvider = "cloudflare";
+export type AiBranch = CloudflareBranch;
+
+export { CloudflareConfigError };
 
 // Keep end-to-end execution cleanly within Vercel's 60s maxDuration across retrieval + inference.
 export const VERCEL_REQUEST_DEADLINE_MS = 54_000;
@@ -40,6 +45,7 @@ export interface AiGenerationOptions {
   compactPromptOptions?: RagPromptOptions;
   systemInstruction?: string;
   promptTag?: string;
+  branch?: AiBranch;
   signal?: AbortSignal;
 }
 
@@ -64,6 +70,7 @@ export interface AiTelemetryEvent {
   event: "ai_request";
   requestId: string;
   endpoint?: string;
+  branch?: AiBranch;
   provider: AiProvider;
   model: string;
   retrievalDurationMs?: number;
@@ -71,7 +78,10 @@ export interface AiTelemetryEvent {
   contextChars?: number;
   promptChars?: number;
   providerDurationMs: number;
+  elapsedMs: number;
   httpStatus: number;
+  classifiedKind?: string;
+  upstreamStatus?: number;
   timedOut: boolean;
   finalStatus: "success" | "error";
 }
@@ -82,6 +92,8 @@ function emitAiTelemetry(payload: AiTelemetryEvent): void {
     requestId: redactSecrets(payload.requestId),
     model: redactSecrets(payload.model),
     ...(payload.endpoint ? { endpoint: redactSecrets(payload.endpoint) } : {}),
+    ...(payload.branch ? { branch: redactSecrets(payload.branch) as AiBranch } : {}),
+    ...(payload.classifiedKind ? { classifiedKind: redactSecrets(payload.classifiedKind) } : {}),
   };
   const line = `[ai.telemetry] ${JSON.stringify(safePayload)}`;
   if (payload.finalStatus === "error") {
@@ -162,24 +174,33 @@ export async function generateRagAnswer(
   options: AiGenerationOptions = {}
 ): Promise<AiRagResult> {
   const requestId = options.requestId ?? crypto.randomUUID();
+  const branch: AiBranch = options.branch ?? "chat";
   const model = getCloudflareChatModel();
   const promptMetrics = buildOptimizedRagPrompt(question, chunks, options.promptOptions);
   const providerStart = Date.now();
 
   try {
-    const res = await generateCloudflareRagAnswer(question, chunks, options);
+    const res = await generateCloudflareRagAnswer(question, chunks, {
+      ...options,
+      branch,
+    });
+    const providerDurationMs = Date.now() - providerStart;
+    const elapsedMs = providerDurationMs + (options.retrievalDurationMs ?? 0);
     emitAiTelemetry({
       event: "ai_request",
       requestId,
       endpoint: options.endpoint,
+      branch,
       provider: "cloudflare",
       model,
       retrievalDurationMs: options.retrievalDurationMs,
       chunksCount: chunks.length,
       contextChars: promptMetrics.contextChars,
       promptChars: res.promptPreview.length,
-      providerDurationMs: Date.now() - providerStart,
+      providerDurationMs,
+      elapsedMs,
       httpStatus: 200,
+      classifiedKind: "ok",
       timedOut: false,
       finalStatus: "success",
     });
@@ -190,19 +211,27 @@ export async function generateRagAnswer(
     };
   } catch (err: unknown) {
     const classified = classifyCloudflareError(err);
-    const formatted = formatCloudflareError(err);
+    const formatted = formatCloudflareError(err, { branch });
+    const providerDurationMs = Date.now() - providerStart;
+    const elapsedMs = providerDurationMs + (options.retrievalDurationMs ?? 0);
     emitAiTelemetry({
       event: "ai_request",
       requestId,
       endpoint: options.endpoint,
+      branch,
       provider: "cloudflare",
       model,
       retrievalDurationMs: options.retrievalDurationMs,
       chunksCount: chunks.length,
       contextChars: promptMetrics.contextChars,
       promptChars: promptMetrics.promptPreview.length,
-      providerDurationMs: Date.now() - providerStart,
+      providerDurationMs,
+      elapsedMs,
       httpStatus: formatted.status,
+      classifiedKind: classified.kind,
+      ...(classified.upstreamStatus !== undefined
+        ? { upstreamStatus: classified.upstreamStatus }
+        : {}),
       timedOut: classified.kind === "timeout",
       finalStatus: "error",
     });
@@ -215,20 +244,28 @@ export async function generateWithoutRagAnswerWithMeta(
   options: AiGenerationOptions = {}
 ): Promise<AiNoRagResult> {
   const requestId = options.requestId ?? crypto.randomUUID();
+  const branch: AiBranch = options.branch ?? "without_rag";
   const model = getCloudflareChatModel();
   const providerStart = Date.now();
 
   try {
-    const completion = await generateCloudflareWithoutRagAnswerDetailed(question, options);
+    const completion = await generateCloudflareWithoutRagAnswerDetailed(question, {
+      ...options,
+      branch,
+    });
+    const providerDurationMs = Date.now() - providerStart;
     emitAiTelemetry({
       event: "ai_request",
       requestId,
       endpoint: options.endpoint,
+      branch,
       provider: "cloudflare",
       model,
       promptChars: question.length,
-      providerDurationMs: Date.now() - providerStart,
+      providerDurationMs,
+      elapsedMs: providerDurationMs,
       httpStatus: 200,
+      classifiedKind: "ok",
       timedOut: false,
       finalStatus: "success",
     });
@@ -240,17 +277,24 @@ export async function generateWithoutRagAnswerWithMeta(
       truncated: completion.truncated,
     };
   } catch (err: unknown) {
-    const formatted = formatCloudflareError(err);
+    const formatted = formatCloudflareError(err, { branch });
     const classified = classifyCloudflareError(err);
+    const providerDurationMs = Date.now() - providerStart;
     emitAiTelemetry({
       event: "ai_request",
       requestId,
       endpoint: options.endpoint,
+      branch,
       provider: "cloudflare",
       model,
       promptChars: question.length,
-      providerDurationMs: Date.now() - providerStart,
+      providerDurationMs,
+      elapsedMs: providerDurationMs,
       httpStatus: formatted.status,
+      classifiedKind: classified.kind,
+      ...(classified.upstreamStatus !== undefined
+        ? { upstreamStatus: classified.upstreamStatus }
+        : {}),
       timedOut: classified.kind === "timeout",
       finalStatus: "error",
     });
@@ -266,8 +310,11 @@ export async function generateWithoutRagAnswer(
   return result.answer;
 }
 
-export function formatAiError(err: unknown): { status: number; message: string } {
-  const formatted = formatCloudflareError(err);
+export function formatAiError(
+  err: unknown,
+  options: { branch?: AiBranch } = {}
+): { status: number; message: string } {
+  const formatted = formatCloudflareError(err, options);
   return {
     status: formatted.status,
     message: redactSecrets(formatted.message),

@@ -27,13 +27,13 @@ const DEPRECATED_CLOUDFLARE_CHAT_MODELS = new Set([
 
 export const CF_GENERATE_TIMEOUT_MS = 32_000;
 export const CF_GENERATE_TOTAL_BUDGET_MS = 46_000;
-export const CF_COMPARE_ATTEMPT_TIMEOUT_MS = 26_000;
-export const CF_COMPARE_TOTAL_BUDGET_MS = 48_000;
+export const CF_COMPARE_ATTEMPT_TIMEOUT_MS = 29_000;
+export const CF_COMPARE_TOTAL_BUDGET_MS = 50_000;
 export const CF_EMBED_TIMEOUT_MS = 12_000;
 export const CF_EMBED_TOTAL_BUDGET_MS = 24_000;
 export const CF_QUERY_EMBED_TIMEOUT_MS = 9_000;
 export const CF_QUERY_EMBED_TOTAL_BUDGET_MS = 15_000;
-const CF_COMPACT_RETRY_MIN_ROOM_MS = 8_000;
+export const CF_COMPACT_RETRY_MIN_ROOM_MS = 8_000;
 
 const CF_EMBED_BATCH_SIZE = 15;
 
@@ -110,38 +110,46 @@ export class CloudflareConfigError extends Error {
 export class CloudflareRateLimitError extends Error {
   statusCode: number;
   retryAfterMs?: number;
-  constructor(message: string, retryAfterMs?: number) {
+  upstreamStatus?: number;
+  constructor(message: string, retryAfterMs?: number, upstreamStatus = 429) {
     super(message);
     this.name = "CloudflareRateLimitError";
     this.statusCode = 429;
     this.retryAfterMs = retryAfterMs;
+    this.upstreamStatus = upstreamStatus;
   }
 }
 
 export class CloudflareQuotaExhaustedError extends Error {
   statusCode: number;
-  constructor(message: string) {
+  upstreamStatus?: number;
+  constructor(message: string, upstreamStatus = 429) {
     super(message);
     this.name = "CloudflareQuotaExhaustedError";
     this.statusCode = 429;
+    this.upstreamStatus = upstreamStatus;
   }
 }
 
 export class CloudflareModelError extends Error {
   statusCode: number;
-  constructor(message: string, statusCode = 400) {
+  upstreamStatus?: number;
+  constructor(message: string, statusCode = 400, upstreamStatus?: number) {
     super(message);
     this.name = "CloudflareModelError";
     this.statusCode = statusCode;
+    this.upstreamStatus = upstreamStatus;
   }
 }
 
 export class CloudflareAuthError extends Error {
   statusCode: number;
-  constructor(message: string) {
+  upstreamStatus?: number;
+  constructor(message: string, upstreamStatus?: number) {
     super(message);
     this.name = "CloudflareAuthError";
     this.statusCode = 403;
+    this.upstreamStatus = upstreamStatus;
   }
 }
 
@@ -353,7 +361,9 @@ function isTimeoutError(err: unknown): boolean {
   );
 }
 
-interface ClassifiedCfError {
+export type CloudflareBranch = "without_rag" | "with_rag" | "chat" | "inspect";
+
+export interface ClassifiedCfError {
   kind:
     | "config"
     | "auth"
@@ -364,6 +374,7 @@ interface ClassifiedCfError {
     | "timeout"
     | "other";
   statusCode: number;
+  upstreamStatus?: number;
   retryable: boolean;
   retryAfterMs?: number;
   rawMessage: string;
@@ -382,6 +393,7 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
     return {
       kind: "auth",
       statusCode: 403,
+      upstreamStatus: err.upstreamStatus,
       retryable: false,
       rawMessage: err.message,
     };
@@ -390,6 +402,7 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
     return {
       kind: "not_found",
       statusCode: err.statusCode,
+      upstreamStatus: err.upstreamStatus,
       retryable: false,
       rawMessage: err.message,
     };
@@ -398,6 +411,7 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
     return {
       kind: "quota_exhausted",
       statusCode: 429,
+      upstreamStatus: err.upstreamStatus,
       retryable: false,
       rawMessage: err.message,
     };
@@ -406,21 +420,15 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
     return {
       kind: "rate_limit",
       statusCode: 429,
+      upstreamStatus: err.upstreamStatus,
       retryable: true,
       retryAfterMs: err.retryAfterMs,
       rawMessage: err.message,
     };
   }
 
-  if (isTimeoutError(err)) {
-    return {
-      kind: "timeout",
-      statusCode: 504,
-      retryable: false,
-      rawMessage: err instanceof Error ? err.message : String(err),
-    };
-  }
-
+  // Evaluate typed upstream HTTP responses BEFORE generic timeout string matching
+  // so 429/5xx error payloads mentioning "timeout" are never misclassified as client-side 504 timeouts.
   if (isHttpAttemptError(err)) {
     const lower = `${err.message} ${err.bodyText}`.toLowerCase();
     const codes = new Set(err.cfCodes);
@@ -438,6 +446,7 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
       return {
         kind: "auth",
         statusCode: 403,
+        upstreamStatus: err.status,
         retryable: false,
         rawMessage: err.message,
       };
@@ -456,6 +465,7 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
       return {
         kind: "not_found",
         statusCode: err.status === 410 ? 410 : 400,
+        upstreamStatus: err.status,
         retryable: false,
         rawMessage: err.message,
       };
@@ -473,6 +483,7 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
       return {
         kind: "quota_exhausted",
         statusCode: 429,
+        upstreamStatus: err.status,
         retryable: false,
         rawMessage: err.message,
       };
@@ -489,6 +500,7 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
       return {
         kind: "rate_limit",
         statusCode: 429,
+        upstreamStatus: err.status,
         retryable: true,
         retryAfterMs: err.retryAfterMs,
         rawMessage: err.message,
@@ -499,6 +511,7 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
       return {
         kind: "transient",
         statusCode: err.status,
+        upstreamStatus: err.status,
         retryable: true,
         retryAfterMs: err.retryAfterMs,
         rawMessage: err.message,
@@ -508,8 +521,18 @@ export function classifyCloudflareError(err: unknown): ClassifiedCfError {
     return {
       kind: "other",
       statusCode: err.status >= 400 && err.status < 600 ? err.status : 500,
+      upstreamStatus: err.status,
       retryable: false,
       rawMessage: err.message,
+    };
+  }
+
+  if (isTimeoutError(err)) {
+    return {
+      kind: "timeout",
+      statusCode: 504,
+      retryable: false,
+      rawMessage: err instanceof Error ? err.message : String(err),
     };
   }
 
@@ -541,7 +564,10 @@ function sanitizeCloudflareErrorMessage(message: string): string {
   return redactSecrets(message);
 }
 
-export function formatCloudflareError(err: unknown): { status: number; message: string } {
+export function formatCloudflareError(
+  err: unknown,
+  options: { branch?: CloudflareBranch } = {}
+): { status: number; message: string } {
   const classified = classifyCloudflareError(err);
   switch (classified.kind) {
     case "config":
@@ -576,6 +602,13 @@ export function formatCloudflareError(err: unknown): { status: number; message: 
       };
     }
     case "timeout":
+      if (options.branch === "without_rag") {
+        return {
+          status: 504,
+          message:
+            "Cloudflare Workers AI baseline (Without RAG) request timed out before completing. Please try again with a shorter or more focused question.",
+        };
+      }
       return {
         status: 504,
         message:
@@ -634,6 +667,7 @@ async function callCloudflareJson<T>(
     totalBudgetMs?: number;
     deadlineMs?: number;
     retryOnTimeout?: boolean;
+    branch?: CloudflareBranch;
     signal?: AbortSignal;
   } = {}
 ): Promise<T> {
@@ -642,12 +676,14 @@ async function callCloudflareJson<T>(
   const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const attemptTimeoutMs = options.attemptTimeoutMs ?? CF_GENERATE_TIMEOUT_MS;
   const defaultBudget = options.totalBudgetMs ?? CF_GENERATE_TOTAL_BUDGET_MS;
-  const budgetCapDeadline = Date.now() + defaultBudget;
+  const callStartedAt = Date.now();
+  const budgetCapDeadline = callStartedAt + defaultBudget;
   const deadline =
     options.deadlineMs !== undefined
       ? Math.min(budgetCapDeadline, options.deadlineMs)
       : budgetCapDeadline;
-  const effectiveTotalBudgetMs = Math.max(0, deadline - Date.now());
+  const effectiveTotalBudgetMs = Math.max(0, deadline - callStartedAt);
+  const safePath = redactSecrets(path);
 
   let lastErr: unknown;
 
@@ -730,19 +766,30 @@ async function callCloudflareJson<T>(
 
       if (!shouldRetry || attempt === maxAttempts) {
         if (classified.kind === "quota_exhausted") {
-          throw new CloudflareQuotaExhaustedError(formatCloudflareError(err).message);
+          throw new CloudflareQuotaExhaustedError(
+            formatCloudflareError(err, { branch: options.branch }).message,
+            classified.upstreamStatus
+          );
         }
         if (classified.kind === "rate_limit") {
           throw new CloudflareRateLimitError(
-            formatCloudflareError(err).message,
-            classified.retryAfterMs
+            formatCloudflareError(err, { branch: options.branch }).message,
+            classified.retryAfterMs,
+            classified.upstreamStatus
           );
         }
         if (classified.kind === "auth") {
-          throw new CloudflareAuthError(formatCloudflareError(err).message);
+          throw new CloudflareAuthError(
+            formatCloudflareError(err, { branch: options.branch }).message,
+            classified.upstreamStatus
+          );
         }
         if (classified.kind === "not_found") {
-          throw new CloudflareModelError(formatCloudflareError(err).message, classified.statusCode);
+          throw new CloudflareModelError(
+            formatCloudflareError(err, { branch: options.branch }).message,
+            classified.statusCode,
+            classified.upstreamStatus
+          );
         }
         throw err;
       }
@@ -761,18 +808,34 @@ async function callCloudflareJson<T>(
       const minAttemptRoomMs =
         effectiveTotalBudgetMs < 5_000
           ? 150
-          : classified.kind === "timeout" && path.includes("/chat/completions")
+          : path.includes("/chat/completions")
           ? CF_COMPACT_RETRY_MIN_ROOM_MS
           : 3_000;
       if (delayMs + minAttemptRoomMs > timeLeftAfter) {
         if (classified.kind === "rate_limit") {
           throw new CloudflareRateLimitError(
-            formatCloudflareError(err).message,
-            classified.retryAfterMs
+            formatCloudflareError(err, { branch: options.branch }).message,
+            classified.retryAfterMs,
+            classified.upstreamStatus
           );
         }
         throw err;
       }
+
+      const retryDiag = {
+        event: "cf_retry",
+        ...(options.branch ? { branch: redactSecrets(options.branch) } : {}),
+        path: safePath,
+        attempt,
+        maxAttempts,
+        classifiedKind: classified.kind,
+        ...(classified.upstreamStatus !== undefined
+          ? { upstreamStatus: classified.upstreamStatus }
+          : {}),
+        retryDelayMs: delayMs,
+        elapsedMs: Date.now() - callStartedAt,
+      };
+      console.warn(`[cloudflare.retry] ${JSON.stringify(retryDiag)}`);
 
       await sleep(delayMs, options.signal);
     } finally {
@@ -1129,7 +1192,8 @@ export const CF_COMPARE_RAG_SYSTEM_INSTRUCTION = [
 
 export const CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION = [
   "You are a general AI assistant answering without access to any private uploaded documents or retrieval context.",
-  "Keep your response concise and complete (1-2 short paragraphs or 3-4 brief bullet points, under ~220 words) from your general training knowledge, ending with a complete sentence without chain-of-thought preamble.",
+  "Provide a concise answer in one short paragraph or at most 3 brief bullet points (around 120-140 words total) from your general training knowledge.",
+  "Respond directly without chain-of-thought preamble, using complete sentences and a natural ending.",
   "If the question refers to specific private files or internal policies you cannot see, clearly state that you do not have access to those uploaded documents.",
 ].join(" ");
 
@@ -1179,6 +1243,7 @@ export async function generateCloudflareRagAnswer(
     compactPromptOptions?: RagPromptOptions;
     systemInstruction?: string;
     promptTag?: string;
+    branch?: CloudflareBranch;
     signal?: AbortSignal;
   } = {}
 ): Promise<{ answer: string; promptPreview: string; finishReason: string | null; truncated: boolean }> {
@@ -1227,6 +1292,7 @@ export async function generateCloudflareRagAnswer(
         totalBudgetMs: number;
         deadlineMs: number;
         retryOnTimeout?: boolean;
+        branch?: CloudflareBranch;
         signal?: AbortSignal;
       }
     ) =>
@@ -1252,6 +1318,7 @@ export async function generateCloudflareRagAnswer(
         totalBudgetMs,
         deadlineMs: effectiveDeadline,
         retryOnTimeout: false,
+        branch: options.branch,
         signal: options.signal,
       });
 
@@ -1270,10 +1337,12 @@ export async function generateCloudflareRagAnswer(
       const classified = classifyCloudflareError(err);
       const remainingMs = effectiveDeadline - Date.now();
       const minRetryRoomMs = totalBudgetMs < 5_000 ? 150 : CF_COMPACT_RETRY_MIN_ROOM_MS;
+      const retryAttemptTimeoutMs = Math.min(attemptTimeoutMs, remainingMs - 100);
       const canRetryCompact =
         classified.kind === "timeout" &&
         maxAttempts > 1 &&
-        remainingMs >= minRetryRoomMs;
+        remainingMs >= minRetryRoomMs &&
+        retryAttemptTimeoutMs >= (totalBudgetMs < 5_000 ? 100 : minRetryRoomMs - 100);
 
       if (!canRetryCompact) {
         throw err;
@@ -1290,15 +1359,16 @@ export async function generateCloudflareRagAnswer(
       );
 
       console.warn(
-        `[cloudflare] Primary RAG completion timed out; retrying once with compact context (${compactPrompt.contextChars} context chars, ${compactPrompt.deduplicatedChunksCount} chunks, max_tokens=${compactMaxTokens}, ${remainingMs}ms remaining).`
+        `[cloudflare] Primary RAG completion timed out (branch=${options.branch ?? "chat"}); retrying once with compact context (${compactPrompt.contextChars} context chars, ${compactPrompt.deduplicatedChunksCount} chunks, max_tokens=${compactMaxTokens}, ${remainingMs}ms remaining).`
       );
 
       const compactRes = await sendChat(compactPrompt.promptPreview, compactMaxTokens, {
         maxAttempts: 1,
-        attemptTimeoutMs: Math.min(attemptTimeoutMs, Math.max(1_000, remainingMs - 100)),
+        attemptTimeoutMs: retryAttemptTimeoutMs,
         totalBudgetMs: remainingMs,
         deadlineMs: effectiveDeadline,
         retryOnTimeout: false,
+        branch: options.branch,
         signal: options.signal,
       });
 
@@ -1335,6 +1405,7 @@ export async function generateCloudflareWithoutRagAnswerDetailed(
     compactMaxTokens?: number;
     systemInstruction?: string;
     promptTag?: string;
+    branch?: CloudflareBranch;
     signal?: AbortSignal;
   } = {}
 ): Promise<CloudflareCompletionMeta> {
@@ -1374,6 +1445,7 @@ export async function generateCloudflareWithoutRagAnswerDetailed(
         totalBudgetMs: number;
         deadlineMs: number;
         retryOnTimeout?: boolean;
+        branch?: CloudflareBranch;
         signal?: AbortSignal;
       }
     ) =>
@@ -1400,6 +1472,7 @@ export async function generateCloudflareWithoutRagAnswerDetailed(
         totalBudgetMs,
         deadlineMs: effectiveDeadline,
         retryOnTimeout: false,
+        branch: options.branch ?? "without_rag",
         signal: options.signal,
       });
     } catch (err: unknown) {
@@ -1410,25 +1483,28 @@ export async function generateCloudflareWithoutRagAnswerDetailed(
       const classified = classifyCloudflareError(err);
       const remainingMs = effectiveDeadline - Date.now();
       const minRetryRoomMs = totalBudgetMs < 5_000 ? 150 : CF_COMPACT_RETRY_MIN_ROOM_MS;
+      const retryAttemptTimeoutMs = Math.min(attemptTimeoutMs, remainingMs - 100);
       const canRetryShorter =
         classified.kind === "timeout" &&
         maxAttempts > 1 &&
-        remainingMs >= minRetryRoomMs;
+        remainingMs >= minRetryRoomMs &&
+        retryAttemptTimeoutMs >= (totalBudgetMs < 5_000 ? 100 : minRetryRoomMs - 100);
 
       if (!canRetryShorter) {
         throw err;
       }
 
       console.warn(
-        `[cloudflare] Primary non-RAG completion timed out; retrying once with reduced max_tokens=${compactMaxTokens} (${remainingMs}ms remaining).`
+        `[cloudflare] Primary non-RAG completion timed out (branch=${options.branch ?? "without_rag"}); retrying once with reduced max_tokens=${compactMaxTokens} (${remainingMs}ms remaining).`
       );
 
       res = await sendNoRag(compactMaxTokens, {
         maxAttempts: 1,
-        attemptTimeoutMs: Math.min(attemptTimeoutMs, Math.max(1_000, remainingMs - 100)),
+        attemptTimeoutMs: retryAttemptTimeoutMs,
         totalBudgetMs: remainingMs,
         deadlineMs: effectiveDeadline,
         retryOnTimeout: false,
+        branch: options.branch ?? "without_rag",
         signal: options.signal,
       });
     }
@@ -1461,6 +1537,7 @@ export async function generateCloudflareWithoutRagAnswer(
     compactMaxTokens?: number;
     systemInstruction?: string;
     promptTag?: string;
+    branch?: CloudflareBranch;
     signal?: AbortSignal;
   } = {}
 ): Promise<string> {
