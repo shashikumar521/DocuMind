@@ -84,7 +84,15 @@ export async function askChatQuestion(params: {
   documentIds?: string[];
   topK?: number;
 }): Promise<{
+  request_id?: string;
   question: string;
+  document_ids?: string[];
+  top_k?: number;
+  ai_provider?: "cloudflare";
+  model?: string;
+  embedding_model?: string;
+  embedding_dimensions?: number | null;
+  total_chunks_indexed?: number;
   answer: string;
   sources: RetrievedChunk[];
   prompt_preview: string;
@@ -106,16 +114,30 @@ export async function compareRagQuestion(params: {
   documentIds?: string[];
   topK?: number;
 }): Promise<CompareResponse> {
-  const res = await fetch("/api/chat/compare", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      question: params.question,
-      document_ids: params.documentIds && params.documentIds.length > 0 ? params.documentIds : undefined,
-      top_k: params.topK ?? 3,
-    }),
-  });
-  return parseResponse(res);
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 58_000);
+  try {
+    const res = await fetch("/api/chat/compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: params.question,
+        document_ids: params.documentIds && params.documentIds.length > 0 ? params.documentIds : undefined,
+        top_k: params.topK ?? 3,
+      }),
+      signal: controller.signal,
+    });
+    return await parseResponse(res);
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(
+        "Cloudflare Workers AI request timed out before completing. Please try again or reduce the retrieved context size."
+      );
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 export async function inspectRetrievalPipeline(params: {
