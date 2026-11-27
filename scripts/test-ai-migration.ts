@@ -19,6 +19,7 @@ import {
   VERCEL_REQUEST_DEADLINE_MS,
 } from "../server/aiClient.js";
 import {
+  CF_COMPACT_RETRY_MIN_ROOM_MS,
   CF_COMPARE_ATTEMPT_TIMEOUT_MS,
   CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION,
   CF_COMPARE_RAG_SYSTEM_INSTRUCTION,
@@ -27,6 +28,7 @@ import {
   CF_GENERATE_TOTAL_BUDGET_MS,
   CF_QUERY_EMBED_TIMEOUT_MS,
   CF_QUERY_EMBED_TOTAL_BUDGET_MS,
+  classifyCloudflareError,
   clearCloudflareCachesForTest,
   CLOUDFLARE_CHAT_MAX_TOKENS,
   CLOUDFLARE_CHAT_MODEL,
@@ -35,6 +37,7 @@ import {
   generateCloudflareEmbeddings,
   generateCloudflareRagAnswer,
   generateCloudflareWithoutRagAnswer,
+  generateCloudflareWithoutRagAnswerDetailed,
   setCloudflareFetchForTest,
 } from "../server/cloudflareClient.js";
 import { chunkPageText } from "../server/ragEngine.js";
@@ -43,6 +46,7 @@ import {
   COMPARE_COMPACT_MAX_CONTEXT_CHARS,
   COMPARE_COMPACT_MAX_OUTPUT_TOKENS,
   COMPARE_MAX_TOP_K,
+  COMPARE_NO_RAG_COMPACT_MAX_OUTPUT_TOKENS,
   COMPARE_NO_RAG_MAX_OUTPUT_TOKENS,
   COMPARE_RAG_MAX_CONTEXT_CHARS,
   COMPARE_RAG_MAX_OUTPUT_TOKENS,
@@ -2326,12 +2330,24 @@ async function runRagComparisonOptimizationAndTimeoutTests() {
     CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
   };
 
+  assert.equal(CF_GENERATE_TIMEOUT_MS, 32_000);
+  assert.equal(CF_GENERATE_TOTAL_BUDGET_MS, 46_000);
+  assert.equal(CF_COMPARE_ATTEMPT_TIMEOUT_MS, 29_000);
+  assert.equal(CF_COMPARE_TOTAL_BUDGET_MS, 50_000);
+  assert.equal(VERCEL_REQUEST_DEADLINE_MS, 54_000);
+  assert.equal(COMPARE_NO_RAG_MAX_OUTPUT_TOKENS, 320);
+  assert.equal(COMPARE_NO_RAG_COMPACT_MAX_OUTPUT_TOKENS, 224);
+  assert.equal(COMPARE_RAG_MAX_OUTPUT_TOKENS, 448);
+  assert.equal(COMPARE_COMPACT_MAX_OUTPUT_TOKENS, 320);
   assert.ok(CF_COMPARE_ATTEMPT_TIMEOUT_MS < CF_GENERATE_TIMEOUT_MS);
   assert.ok(CF_COMPARE_TOTAL_BUDGET_MS - CF_COMPARE_ATTEMPT_TIMEOUT_MS >= 20_000);
   assert.ok(CF_COMPARE_TOTAL_BUDGET_MS <= VERCEL_REQUEST_DEADLINE_MS);
   assert.ok(VERCEL_REQUEST_DEADLINE_MS < 60_000);
   assert.ok(COMPARE_RAG_MAX_CONTEXT_CHARS < RAG_MAX_CONTEXT_CHARS);
   assert.ok(COMPARE_RAG_MAX_OUTPUT_TOKENS < RAG_MAX_OUTPUT_TOKENS);
+  assert.match(CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION, /120-140 words/i);
+  assert.match(CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION, /3 brief bullet points/i);
+  assert.match(CF_COMPARE_NO_RAG_SYSTEM_INSTRUCTION, /complete sentences/i);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "documind-compare-test-"));
   try {
@@ -2565,7 +2581,8 @@ async function runRagComparisonOptimizationAndTimeoutTests() {
       const ragSecond = recoveryPayloads.filter((p) => p.isRag)[1];
       const noRagSecond = recoveryPayloads.filter((p) => !p.isRag)[1];
       assert.equal(ragSecond.maxTokens, COMPARE_COMPACT_MAX_OUTPUT_TOKENS);
-      assert.equal(noRagSecond.maxTokens, COMPARE_COMPACT_MAX_OUTPUT_TOKENS);
+      assert.equal(noRagSecond.maxTokens, COMPARE_NO_RAG_COMPACT_MAX_OUTPUT_TOKENS);
+      assert.equal(noRagSecond.maxTokens, 224);
       assert.equal(recoverBody.with_rag.prompt_preview, ragSecond.prompt);
       const compactMatch = recoverBody.with_rag.prompt_preview.match(
         /<retrieved_context>\n([\s\S]*)\n<\/retrieved_context>/
@@ -2734,6 +2751,10 @@ async function runRagComparisonOptimizationAndTimeoutTests() {
       assert.equal(partialRagOkBody.without_rag.answer, "");
       assert.equal(partialRagOkBody.without_rag.timed_out, true);
       assert.match(partialRagOkBody.without_rag.error ?? "", /timed out before completing/i);
+      assert.ok(
+        !/retrieved context/i.test(partialRagOkBody.without_rag.error ?? ""),
+        "Without RAG timeout error must not mention retrieved context"
+      );
       assert.equal(partialRagOkBody.with_rag.status, "completed");
       assert.ok(partialRagOkBody.with_rag.answer.includes("[Policy_A.pdf, p. 1]"));
       assert.ok(partialRagOkBody.with_rag.sources.length > 0);
@@ -2821,8 +2842,186 @@ async function runRagComparisonOptimizationAndTimeoutTests() {
       assert.ok(ragCompareSource.includes("withoutRagStatus"));
       assert.ok(ragCompareSource.includes("withRagStatus"));
 
+      // 20f. Remaining-time retry guard, HTTP-first error classification, and branch-aware safe telemetry/retry logs
+      clearCloudflareCachesForTest();
+      let shortBudgetAttempts = 0;
+      setCloudflareFetchForTest(async () => {
+        shortBudgetAttempts += 1;
+        const err = new Error("Cloudflare Workers AI request timed out after 5000ms.");
+        err.name = "AbortError";
+        throw err;
+      });
+      await assert.rejects(
+        () =>
+          generateCloudflareWithoutRagAnswerDetailed("Short remaining room test", {
+            totalBudgetMs: CF_COMPARE_TOTAL_BUDGET_MS,
+            attemptTimeoutMs: CF_COMPARE_ATTEMPT_TIMEOUT_MS,
+            deadlineMs: Date.now() + CF_COMPACT_RETRY_MIN_ROOM_MS - 1_500,
+            maxTokens: COMPARE_NO_RAG_MAX_OUTPUT_TOKENS,
+            compactMaxTokens: COMPARE_NO_RAG_COMPACT_MAX_OUTPUT_TOKENS,
+            branch: "without_rag",
+          }),
+        (err) => formatAiError(err, { branch: "without_rag" }).status === 504
+      );
+      assert.equal(
+        shortBudgetAttempts,
+        1,
+        "Must skip compact retry when remaining budget is below CF_COMPACT_RETRY_MIN_ROOM_MS"
+      );
+
+      // Upstream HTTP 524/502/429 bodies containing "timeout" must NOT be coerced into client 504 timeout
+      const upstream524Err = {
+        status: 524,
+        bodyText: JSON.stringify({ errors: [{ message: "Origin inference timeout occurred" }] }),
+        cfCodes: [],
+        message: "Origin inference timeout occurred",
+      };
+      const classified524 = classifyCloudflareError(upstream524Err);
+      assert.equal(classified524.kind, "transient");
+      assert.equal(classified524.upstreamStatus, 524);
+      assert.equal(classified524.statusCode, 524);
+      const formatted524 = formatCloudflareError(upstream524Err, { branch: "without_rag" });
+      assert.equal(formatted524.status, 503);
+      assert.ok(!/timed out before completing/i.test(formatted524.message));
+
+      const upstream429TimeoutBodyErr = {
+        status: 429,
+        retryAfterMs: 1200,
+        bodyText: JSON.stringify({ errors: [{ code: 3040, message: "Rate limit queue timeout" }] }),
+        cfCodes: [3040],
+        message: "Rate limit queue timeout",
+      };
+      const classified429 = classifyCloudflareError(upstream429TimeoutBodyErr);
+      assert.equal(classified429.kind, "rate_limit");
+      assert.equal(classified429.upstreamStatus, 429);
+      assert.equal(classified429.statusCode, 429);
+
+      // Telemetry & intermediate retry diagnostics across compare/chat/inspect with redaction
+      clearCloudflareCachesForTest();
+      const diagTelemetryLines: string[] = [];
+      const diagRetryLines: string[] = [];
+      const origInfo2 = console.info;
+      const origWarn2 = console.warn;
+      const origError2 = console.error;
+      console.info = (...args: unknown[]) => diagTelemetryLines.push(args.map(String).join(" "));
+      console.error = (...args: unknown[]) => diagTelemetryLines.push(args.map(String).join(" "));
+      console.warn = (...args: unknown[]) => diagRetryLines.push(args.map(String).join(" "));
+      try {
+        let compareNoRagTries = 0;
+        let compareRagTries = 0;
+        setCloudflareFetchForTest(async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/ai/v1/embeddings")) {
+            return new Response(
+              JSON.stringify({ data: [{ index: 0, embedding: queryVec }] }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          const body = JSON.parse(String(init?.body)) as {
+            messages: Array<{ role: string; content: string }>;
+          };
+          const isRag = body.messages[1].content.includes("<retrieved_context>");
+          if (!isRag) {
+            compareNoRagTries += 1;
+            if (compareNoRagTries === 1) {
+              return new Response(
+                JSON.stringify({ errors: [{ code: 3040, message: "Rate limit capacity exceeded" }] }),
+                { status: 429, headers: { "retry-after-ms": "20" } }
+              );
+            }
+            return new Response(
+              JSON.stringify({ errors: [{ message: "Upstream gateway timeout error" }] }),
+              { status: 502 }
+            );
+          }
+          compareRagTries += 1;
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  finish_reason: "stop",
+                  message: { content: "Grounded policy answer [Policy_A.pdf, p. 1]." },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        });
+
+        const diagCompareResp = await realFetch(`${baseUrl}/api/chat/compare`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: "SensitiveSecretMarkerQuestion for diagnostics?" }),
+        });
+        assert.equal(diagCompareResp.status, 200);
+        const diagCompareBody = (await diagCompareResp.json()) as {
+          partial: boolean;
+          without_rag: { status: string; timed_out?: boolean; error?: string };
+          with_rag: { status: string; answer: string };
+        };
+        assert.equal(compareNoRagTries, 2);
+        assert.equal(compareRagTries, 1);
+        assert.equal(diagCompareBody.partial, true);
+        assert.equal(diagCompareBody.without_rag.status, "error");
+        assert.equal(diagCompareBody.without_rag.timed_out, false, "Upstream HTTP 502 with 'timeout' in body must not be marked timed_out=true");
+        assert.equal(diagCompareBody.with_rag.status, "completed");
+
+        // Trigger /api/chat/ask and /api/retrieval/inspect to verify chat/inspect branch tags
+        const chatResp = await realFetch(`${baseUrl}/api/chat/ask`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: "ChatBranchSensitivePrompt?" }),
+        });
+        assert.equal(chatResp.status, 200);
+
+        const inspectResp = await realFetch(`${baseUrl}/api/retrieval/inspect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: "InspectBranchSensitivePrompt?" }),
+        });
+        assert.equal(inspectResp.status, 200);
+
+        const telemetryEvents = diagTelemetryLines
+          .filter((l) => l.includes("[ai.telemetry]"))
+          .map((l) => JSON.parse(l.replace(/^.*\[ai\.telemetry\]\s*/, "")) as Record<string, unknown>);
+        const retryEvents = diagRetryLines
+          .filter((l) => l.includes("[cloudflare.retry]"))
+          .map((l) => JSON.parse(l.replace(/^.*\[cloudflare\.retry\]\s*/, "")) as Record<string, unknown>);
+
+        const withoutEvt = telemetryEvents.find((e) => e.branch === "without_rag");
+        const withEvt = telemetryEvents.find((e) => e.branch === "with_rag");
+        const chatEvt = telemetryEvents.find((e) => e.branch === "chat");
+        const inspectEvt = telemetryEvents.find((e) => e.branch === "inspect");
+        assert.ok(withoutEvt && withEvt && chatEvt && inspectEvt, "Telemetry must cover all 4 branches");
+        assert.equal(withoutEvt.classifiedKind, "transient");
+        assert.equal(withoutEvt.upstreamStatus, 502);
+        assert.equal(typeof withoutEvt.elapsedMs, "number");
+        assert.equal(withEvt.classifiedKind, "ok");
+        assert.equal(typeof withEvt.elapsedMs, "number");
+
+        assert.ok(retryEvents.length >= 1, "Intermediate retryable HTTP error must emit [cloudflare.retry]");
+        assert.equal(retryEvents[0].branch, "without_rag");
+        assert.equal(retryEvents[0].path, "/chat/completions");
+        assert.equal(retryEvents[0].attempt, 1);
+        assert.equal(retryEvents[0].upstreamStatus, 429);
+        assert.equal(typeof retryEvents[0].retryDelayMs, "number");
+        assert.equal(typeof retryEvents[0].elapsedMs, "number");
+
+        const allDiagText = [...diagTelemetryLines, ...diagRetryLines].join("\n");
+        assert.ok(!allDiagText.includes("cf-compare-secret-token"));
+        assert.ok(!allDiagText.includes("cf-compare-account"));
+        assert.ok(!allDiagText.includes("SensitiveSecretMarkerQuestion"));
+        assert.ok(!allDiagText.includes("ChatBranchSensitivePrompt"));
+        assert.ok(!allDiagText.includes("InspectBranchSensitivePrompt"));
+        assert.ok(!allDiagText.includes("Zero-trust verification requires hardware MFA"));
+      } finally {
+        console.info = origInfo2;
+        console.warn = origWarn2;
+        console.error = origError2;
+      }
+
       console.log(
-        "PASS: RAG Comparison optimization, finish_reason verification, partial-branch recovery, and error handling tests passed (5/5)."
+        "PASS: RAG Comparison optimization, finish_reason verification, partial-branch recovery, error classification, and safe diagnostics tests passed (6/6)."
       );
     } finally {
       await new Promise<void>((resolve, reject) =>
